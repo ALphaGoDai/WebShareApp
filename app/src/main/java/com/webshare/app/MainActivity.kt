@@ -96,9 +96,16 @@ class MainActivity : AppCompatActivity() {
         settings.useWideViewPort = true
         settings.databaseEnabled = true
         settings.cacheMode = WebSettings.LOAD_DEFAULT
-        settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+        settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
         settings.javaScriptCanOpenWindowsAutomatically = true
         settings.setSupportMultipleWindows(false)
+        // Disable WebView HTTPS upgrade
+        try {
+            val experimental = webView.settings.javaClass
+                .getMethod("setHttpsUpgradeEnabled", Boolean::class.javaPrimitiveType)
+            experimental.invoke(webView.settings, false)
+        } catch (e: Exception) {
+        }
 
         webView.webViewClient = createWebViewClient()
         webView.webChromeClient = object : WebChromeClient() {

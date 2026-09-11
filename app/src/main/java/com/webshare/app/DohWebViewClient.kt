@@ -1,6 +1,7 @@
 package com.webshare.app
 
 import android.content.Intent
+import android.net.Uri
 import android.webkit.CookieManager
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -19,6 +20,7 @@ open class DohWebViewClient(
 ) : WebViewClient() {
 
     private var dohClient: OkHttpClient? = null
+    private var plainClient: OkHttpClient? = null
 
     init {
         if (dohEnabled && dohUrl.isNotEmpty()) {
@@ -32,28 +34,35 @@ open class DohWebViewClient(
                 .readTimeout(15, TimeUnit.SECONDS)
                 .build()
         }
+
+        plainClient = OkHttpClient.Builder()
+            .cookieJar(WebCookieJar())
+            .followRedirects(true)
+            .followSslRedirects(true)
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(15, TimeUnit.SECONDS)
+            .build()
     }
 
     override fun shouldInterceptRequest(
         view: WebView?,
         request: WebResourceRequest?
     ): WebResourceResponse? {
-        if (!dohEnabled) return null
-        val client = dohClient ?: return null
         val url = request?.url ?: return null
 
         val scheme = url.scheme ?: return null
         if (scheme != "http" && scheme != "https") return null
 
-        // 只拦截 GET 请求（WebResourceRequest 无法获取 POST body）
         if (request.method != "GET") return null
 
+        val client = if (dohEnabled) dohClient else plainClient
+        ?: return null
+
         return try {
-            val builder = Request.Builder().url(url.toString())
+            val urlStr = url.toString()
+            val builder = Request.Builder().url(urlStr)
 
             for ((key, value) in request.requestHeaders) {
-                // 不复制 Accept-Encoding，让 OkHttp 处理压缩
-                // 不复制 Cookie，通过 CookieJar 统一管理
                 if (!key.equals("Accept-Encoding", ignoreCase = true) &&
                     !key.equals("Cookie", ignoreCase = true)
                 ) {
@@ -63,7 +72,6 @@ open class DohWebViewClient(
 
             val response = client.newCall(builder.build()).execute()
 
-            // 解析 Content-Type 和 charset
             val contentTypeHeader = response.header("Content-Type") ?: "text/html"
             val parts = contentTypeHeader.split(";")
             val mimeType = parts[0].trim()
@@ -73,7 +81,6 @@ open class DohWebViewClient(
                 "utf-8"
             }
 
-            // 构建响应头（排除 Set-Cookie，由 CookieJar 处理）
             val responseHeaders = mutableMapOf<String, String>()
             for ((key, value) in response.headers) {
                 if (!key.equals("Set-Cookie", ignoreCase = true)) {
@@ -104,17 +111,14 @@ open class DohWebViewClient(
         val scheme = url.scheme ?: return false
 
         if (scheme == "http" || scheme == "https") {
-            // 在 WebView 内打开
             return false
         }
 
-        // 非 http(s) 协议交给系统处理
         try {
             val intent = Intent(Intent.ACTION_VIEW, url)
             intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
             view?.context?.startActivity(intent)
         } catch (e: Exception) {
-            // 没有可处理的应用
         }
         return true
     }
