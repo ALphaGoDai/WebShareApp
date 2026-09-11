@@ -70,6 +70,10 @@ class DohDnsResolver(private val dohUrl: String) : Dns {
             }
         } catch (e: Exception) {
             cache[hostname]?.let { return it.addresses }
+            try {
+                return Dns.SYSTEM.lookup(hostname)
+            } catch (e2: Exception) {
+            }
             val ex = UnknownHostException(hostname)
             ex.initCause(e)
             throw ex

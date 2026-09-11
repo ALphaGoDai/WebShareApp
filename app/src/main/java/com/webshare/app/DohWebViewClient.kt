@@ -70,6 +70,11 @@ open class DohWebViewClient(
                 }
             }
 
+            val hasUA = request.requestHeaders.keys.any { it.equals("User-Agent", ignoreCase = true) }
+            if (!hasUA) {
+                builder.header("User-Agent", "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36")
+            }
+
             val response = client.newCall(builder.build()).execute()
 
             val contentTypeHeader = response.header("Content-Type") ?: "text/html"
