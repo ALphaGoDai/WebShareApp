@@ -56,7 +56,7 @@ open class DohWebViewClient(
         if (request.method != "GET") return null
 
         val client = if (dohEnabled) dohClient else plainClient
-        ?: return null
+        if (client == null) return null
 
         return try {
             val urlStr = url.toString()
