@@ -15,8 +15,13 @@ import java.io.ByteArrayOutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.net.URL
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.zip.GZIPInputStream
+import javax.net.ssl.HttpsURLConnection
+import javax.net.ssl.SNIHostName
+import javax.net.ssl.SSLSocket
+import javax.net.ssl.SSLSocketFactory
 
 open class DohWebViewClient(
     private val dohEnabled: Boolean,
@@ -29,6 +34,9 @@ open class DohWebViewClient(
     private val dnsResolver: DohDnsResolver? = if (dohEnabled && dohUrl.isNotEmpty()) {
         try { DohDnsResolver(dohUrl) } catch (e: Exception) { null }
     } else null
+
+    // Hosts that rejected cleartext but work over TLS
+    private val tlsOnlyHosts = ConcurrentHashMap<String, Boolean>()
 
     private val httpsClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
@@ -62,24 +70,52 @@ open class DohWebViewClient(
         }
 
         return try {
-            if (urlStr.startsWith("https://", ignoreCase = true)) {
-                try {
-                    fetchWithOkHttp(urlStr, request.requestHeaders)
-                } catch (e: Exception) {
-                    // Self-heal: if the configured site fails over HTTPS
-                    // (misconfigured scheme, http-only server), retry as plain HTTP.
-                    if (configuredHost.isNotEmpty() && host == configuredHost) {
-                        val httpUrl = urlStr.replaceFirst("https://", "http://", ignoreCase = true)
-                        fetchWithRawSocket(httpUrl, request.requestHeaders)
-                    } else {
-                        throw e
-                    }
-                }
-            } else {
-                fetchWithRawSocket(urlStr, request.requestHeaders)
-            }
+            smartFetch(urlStr, host, request.requestHeaders)
         } catch (e: Exception) {
             makeErrorResponse(buildErrorText(urlStr, host, e))
+        }
+    }
+
+    private fun toHttps(u: String) =
+        u.replaceFirst("http://", "https://", ignoreCase = true)
+
+    private fun smartFetch(
+        urlStr: String,
+        host: String,
+        headers: Map<String, String>
+    ): WebResourceResponse {
+        if (urlStr.startsWith("https://", ignoreCase = true)) {
+            try {
+                return fetchWithOkHttp(urlStr, headers)
+            } catch (e: Exception) {
+                // OkHttp is strict about response parsing; retry over a raw
+                // TLS socket with the lenient parser.
+                try {
+                    return fetchWithTlsRawSocket(urlStr, headers)
+                } catch (e2: Exception) {
+                    // Site may actually be plain http (misconfigured scheme)
+                    if (configuredHost.isNotEmpty() && host == configuredHost) {
+                        return fetchWithRawSocket(
+                            urlStr.replaceFirst("https://", "http://", ignoreCase = true),
+                            headers
+                        )
+                    }
+                    throw e2
+                }
+            }
+        }
+
+        // Cleartext URL
+        if (tlsOnlyHosts[host] == true) {
+            return fetchWithTlsRawSocket(toHttps(urlStr), headers)
+        }
+        return try {
+            fetchWithRawSocket(urlStr, headers)
+        } catch (e: Exception) {
+            // Some servers only accept TLS even on non-standard ports
+            val resp = fetchWithTlsRawSocket(toHttps(urlStr), headers)
+            tlsOnlyHosts[host] = true
+            resp
         }
     }
 
@@ -142,7 +178,10 @@ open class DohWebViewClient(
         val body = response.body?.byteStream()
             ?: throw java.io.IOException("Empty response body")
 
-        return WebResourceResponse(mime, cs, response.code, response.message, respHeaders, body)
+        // Android's WebResourceResponse rejects empty reason phrases, but the
+        // site's status line may omit it (e.g. "HTTP/1.1 200").
+        val reason = response.message.ifEmpty { "OK" }
+        return WebResourceResponse(mime, cs, response.code, reason, respHeaders, body)
     }
 
     private fun fetchWithRawSocket(
@@ -150,69 +189,111 @@ open class DohWebViewClient(
         headers: Map<String, String>
     ): WebResourceResponse {
         val parsed = URL(urlStr)
+        val port = parsed.port.takeIf { it > 0 } ?: parsed.defaultPort
+        val ip = resolveHost(parsed.host)
+
+        val socket = Socket()
+        try {
+            socket.connect(InetSocketAddress(ip, port), 15000)
+            socket.soTimeout = 15000
+            return exchangeOverSocket(socket, parsed, urlStr, headers)
+        } finally {
+            try { socket.close() } catch (_: Exception) {}
+        }
+    }
+
+    private fun fetchWithTlsRawSocket(
+        urlStr: String,
+        headers: Map<String, String>
+    ): WebResourceResponse {
+        val parsed = URL(urlStr)
+        val host = parsed.host
+        val port = parsed.port.takeIf { it > 0 } ?: parsed.defaultPort
+        val ip = resolveHost(host)
+
+        val factory = SSLSocketFactory.getDefault() as SSLSocketFactory
+        val raw = Socket()
+        try {
+            raw.connect(InetSocketAddress(ip, port), 15000)
+            raw.soTimeout = 15000
+            val ssl = factory.createSocket(raw, host, port, true) as SSLSocket
+            try {
+                val params = ssl.sslParameters
+                params.serverNames = listOf(SNIHostName(host))
+                ssl.sslParameters = params
+                ssl.startHandshake()
+                if (!HttpsURLConnection.getDefaultHostnameVerifier()
+                        .verify(host, ssl.session)
+                ) {
+                    throw java.io.IOException("TLS证书主机名不匹配: $host")
+                }
+                return exchangeOverSocket(ssl, parsed, urlStr, headers)
+            } finally {
+                try { ssl.close() } catch (_: Exception) {}
+            }
+        } finally {
+            try { raw.close() } catch (_: Exception) {}
+        }
+    }
+
+    private fun exchangeOverSocket(
+        socket: Socket,
+        parsed: URL,
+        originalUrl: String,
+        headers: Map<String, String>
+    ): WebResourceResponse {
         val host = parsed.host
         val port = parsed.port.takeIf { it > 0 } ?: parsed.defaultPort
         val path = (parsed.path.ifEmpty { "/" }) +
             (parsed.query?.let { "?$it" } ?: "")
 
-        val ip = resolveHost(host)
+        val out = socket.getOutputStream()
 
-        val socket = Socket()
-        socket.connect(InetSocketAddress(ip, port), 15000)
-        socket.soTimeout = 15000
+        val sb = StringBuilder()
+        sb.append("GET ").append(path).append(" HTTP/1.1\r\n")
+        val hostHeader = if (port != 80 && port != 443) "$host:$port" else host
+        sb.append("Host: ").append(hostHeader).append("\r\n")
 
-        try {
-            val out = socket.getOutputStream()
-
-            val sb = StringBuilder()
-            sb.append("GET ").append(path).append(" HTTP/1.1\r\n")
-            val hostHeader = if (port != 80) "$host:$port" else host
-            sb.append("Host: ").append(hostHeader).append("\r\n")
-
-            var hasUA = false
-            for ((key, value) in headers) {
-                if (key.equals("Accept-Encoding", true)) continue
-                if (key.equals("Cookie", true)) continue
-                if (key.equals("Host", true)) continue
-                sb.append(key).append(": ").append(value).append("\r\n")
-                if (key.equals("User-Agent", true)) hasUA = true
-            }
-            if (!hasUA) {
-                sb.append("User-Agent: Mozilla/5.0 (Linux; Android 12) ")
-                    .append("AppleWebKit/537.36 (KHTML, like Gecko) ")
-                    .append("Chrome/120.0.0.0 Mobile Safari/537.36\r\n")
-            }
-
-            val cookies = CookieManager.getInstance().getCookie(urlStr)
-            if (!cookies.isNullOrEmpty()) {
-                sb.append("Cookie: ").append(cookies).append("\r\n")
-            }
-
-            sb.append("Connection: close\r\n")
-            sb.append("\r\n")
-
-            out.write(sb.toString().toByteArray(Charsets.UTF_8))
-            out.flush()
-
-            val input = socket.getInputStream()
-            val baos = ByteArrayOutputStream()
-            val buf = ByteArray(8192)
-            while (true) {
-                val read = input.read(buf)
-                if (read <= 0) break
-                baos.write(buf, 0, read)
-            }
-
-            val responseData = baos.toByteArray()
-            if (responseData.isEmpty()) {
-                throw java.io.IOException("服务器接受连接但未返回任何数据")
-            }
-
-            return parseRawResponse(responseData, urlStr)
-
-        } finally {
-            socket.close()
+        var hasUA = false
+        for ((key, value) in headers) {
+            if (key.equals("Accept-Encoding", true)) continue
+            if (key.equals("Cookie", true)) continue
+            if (key.equals("Host", true)) continue
+            sb.append(key).append(": ").append(value).append("\r\n")
+            if (key.equals("User-Agent", true)) hasUA = true
         }
+        if (!hasUA) {
+            sb.append("User-Agent: Mozilla/5.0 (Linux; Android 12) ")
+                .append("AppleWebKit/537.36 (KHTML, like Gecko) ")
+                .append("Chrome/120.0.0.0 Mobile Safari/537.36\r\n")
+        }
+
+        val cookies = CookieManager.getInstance().getCookie(originalUrl)
+        if (!cookies.isNullOrEmpty()) {
+            sb.append("Cookie: ").append(cookies).append("\r\n")
+        }
+
+        sb.append("Connection: close\r\n")
+        sb.append("\r\n")
+
+        out.write(sb.toString().toByteArray(Charsets.UTF_8))
+        out.flush()
+
+        val input = socket.getInputStream()
+        val baos = ByteArrayOutputStream()
+        val buf = ByteArray(8192)
+        while (true) {
+            val read = input.read(buf)
+            if (read <= 0) break
+            baos.write(buf, 0, read)
+        }
+
+        val responseData = baos.toByteArray()
+        if (responseData.isEmpty()) {
+            throw java.io.IOException("服务器接受连接但未返回任何数据")
+        }
+
+        return parseRawResponse(responseData, originalUrl)
     }
 
     private fun resolveHost(host: String): String {
