@@ -9,7 +9,7 @@
   var CB = (window.__wscb = {});
   var TIMEOUT_MS = 30000;
 
-  function callBridge(method, url, body, contentType) {
+  function callBridge(method, url, body, contentType, headers) {
     return new Promise(function(resolve, reject) {
       var id = 'c' + (++seq);
       var timer = setTimeout(function() {
@@ -22,11 +22,16 @@
         if (r && r.ok) resolve(r);
         else reject(new TypeError((r && r.error) || 'network error'));
       };
+      var hjson = '{}';
+      try { hjson = JSON.stringify(headers || {}); } catch (e) {}
       try {
         if (method === 'GET') {
-          bridge.httpGet(url, '__wscb.' + id);
+          if (bridge.httpGetH) bridge.httpGetH(url, '__wscb.' + id, hjson);
+          else bridge.httpGet(url, '__wscb.' + id);
         } else {
-          bridge.httpPost(url, body || '', contentType || 'application/x-www-form-urlencoded', '__wscb.' + id);
+          var ct = contentType || 'application/x-www-form-urlencoded';
+          if (bridge.httpPostH) bridge.httpPostH(url, body || '', ct, '__wscb.' + id, hjson);
+          else bridge.httpPost(url, body || '', ct, '__wscb.' + id);
         }
       } catch (e) {
         clearTimeout(timer);
@@ -52,6 +57,24 @@
       }
     } catch (e) {}
     return null;
+  }
+
+  function headerAll(h) {
+    var out = {};
+    try {
+      if (!h) return out;
+      if (typeof h.forEach === 'function') {
+        h.forEach(function(v, k) { out[k] = v; });
+        return out;
+      }
+      if (Array.isArray(h)) {
+        for (var i = 0; i < h.length; i++) out[h[i][0]] = h[i][1];
+        return out;
+      }
+      var keys = Object.keys(h);
+      for (var j = 0; j < keys.length; j++) out[keys[j]] = h[keys[j]];
+    } catch (e) {}
+    return out;
   }
 
   function bodyToText(b) {
@@ -133,10 +156,11 @@
         if (!url) throw err;
         var method = String(opts.method || 'GET').toUpperCase();
         var ct = headerGet(opts.headers, 'content-type') || '';
+        var hdrs = headerAll(opts.headers);
         return bodyToText(opts.body)
           .then(function(text) {
             if (!ct && method !== 'GET') ct = 'application/x-www-form-urlencoded';
-            return callBridge(method, url, text, ct);
+            return callBridge(method, url, text, ct, hdrs);
           })
           .then(function(r) {
             return makeResp(r, url);
@@ -228,9 +252,11 @@
         if (!abs) { finishError(); return; }
         retried = true;
         var ct = reqHeaders['content-type'] || '';
+        var hdrs = {};
+        for (var hk in reqHeaders) hdrs[hk] = reqHeaders[hk];
         bodyToText(sentBody)
           .then(function(text) {
-            return callBridge(method, abs, text, method === 'GET' ? '' : ct);
+            return callBridge(method, abs, text, method === 'GET' ? '' : ct, hdrs);
           })
           .then(finishBridge)
           .catch(finishError);

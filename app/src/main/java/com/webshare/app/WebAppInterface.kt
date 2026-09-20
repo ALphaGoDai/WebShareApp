@@ -3,6 +3,7 @@ package com.webshare.app
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import okhttp3.MediaType.Companion.toMediaType
@@ -93,13 +94,24 @@ class WebAppInterface(private val context: Context) {
      */
     @JavascriptInterface
     fun httpPost(url: String, body: String, contentType: String, callback: String) {
-        enqueue(url, "POST", body, contentType, callback)
+        enqueue(url, "POST", body, contentType, callback, "")
+    }
+
+    /** 带自定义请求头版本：headersJson 形如 {"Authorization":"Bearer x"} */
+    @JavascriptInterface
+    fun httpPostH(url: String, body: String, contentType: String, callback: String, headersJson: String) {
+        enqueue(url, "POST", body, contentType, callback, headersJson)
     }
 
     /** GET 版本，用法同 httpPost（body/contentType 传空字符串）。 */
     @JavascriptInterface
     fun httpGet(url: String, callback: String) {
-        enqueue(url, "GET", "", "", callback)
+        enqueue(url, "GET", "", "", callback, "")
+    }
+
+    @JavascriptInterface
+    fun httpGetH(url: String, callback: String, headersJson: String) {
+        enqueue(url, "GET", "", "", callback, headersJson)
     }
 
     private fun enqueue(
@@ -107,11 +119,12 @@ class WebAppInterface(private val context: Context) {
         method: String,
         body: String,
         contentType: String,
-        callback: String
+        callback: String,
+        headersJson: String
     ) {
         executor.execute {
             val result = try {
-                executeRequest(url, method, body, contentType)
+                executeRequest(url, method, body, contentType, headersJson)
             } catch (e: Exception) {
                 failResult(e.message ?: "未知错误")
             }
@@ -161,18 +174,37 @@ class WebAppInterface(private val context: Context) {
         url: String,
         method: String,
         body: String,
-        contentType: String
+        contentType: String,
+        headersJson: String
     ): String {
+        val extraHeaders = parseHeaders(headersJson)
         return try {
-            executeWithOkHttp(url, method, body, contentType)
+            executeWithOkHttp(url, method, body, contentType, extraHeaders)
         } catch (e: Exception) {
             // OkHttp strict parsing failed; retry over raw socket with the
             // lenient parser (plain first, then TLS).
             try {
-                executeWithRawSocket(url, method, body, contentType, false)
+                executeWithRawSocket(url, method, body, contentType, false, extraHeaders)
             } catch (e2: Exception) {
-                executeWithRawSocket(url, method, body, contentType, true)
+                executeWithRawSocket(url, method, body, contentType, true, extraHeaders)
             }
+        }
+    }
+
+    private fun parseHeaders(json: String): Map<String, String> {
+        if (json.isEmpty()) return emptyMap()
+        return try {
+            val obj = JSONObject(json)
+            val map = mutableMapOf<String, String>()
+            for (key in obj.keys()) {
+                val skip = key.equals("Content-Type", true) || key.equals("Cookie", true) ||
+                    key.equals("Content-Length", true) || key.equals("Host", true) ||
+                    key.equals("Connection", true) || key.equals("Accept-Encoding", true)
+                if (!skip) map[key] = obj.getString(key)
+            }
+            map
+        } catch (e: Exception) {
+            emptyMap()
         }
     }
 
@@ -181,6 +213,9 @@ class WebAppInterface(private val context: Context) {
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(15, TimeUnit.SECONDS)
         cachedResolver?.let { cb.dns(it) }
+        // Share the WebView cookie store: cookies set by bridge POSTs become
+        // visible to subsequent page navigations (login session fix).
+        cb.cookieJar(WebCookieJar())
         return cb.build()
     }
 
@@ -188,7 +223,8 @@ class WebAppInterface(private val context: Context) {
         url: String,
         method: String,
         body: String,
-        contentType: String
+        contentType: String,
+        extraHeaders: Map<String, String>
     ): String {
         val builder = Request.Builder().url(url)
         if (method == "POST") {
@@ -198,6 +234,7 @@ class WebAppInterface(private val context: Context) {
         } else {
             builder.get()
         }
+        for ((k, v) in extraHeaders) builder.header(k, v)
         builder.header(
             "User-Agent",
             "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 " +
@@ -214,7 +251,8 @@ class WebAppInterface(private val context: Context) {
         method: String,
         body: String,
         contentType: String,
-        useTls: Boolean
+        useTls: Boolean,
+        extraHeaders: Map<String, String> = emptyMap()
     ): String {
         val parsed = URL(url)
         val host = parsed.host
@@ -254,6 +292,14 @@ class WebAppInterface(private val context: Context) {
                 .append("AppleWebKit/537.36 (KHTML, like Gecko) ")
                 .append("Chrome/120.0.0.0 Mobile Safari/537.36\r\n")
 
+            for ((k, v) in extraHeaders) sb.append(k).append(": ").append(v).append("\r\n")
+
+            // Session cookies from the WebView cookie store (login session fix)
+            val cookies = CookieManager.getInstance().getCookie(url)
+            if (!cookies.isNullOrEmpty()) {
+                sb.append("Cookie: ").append(cookies).append("\r\n")
+            }
+
             val bodyBytes = body.toByteArray(Charsets.UTF_8)
             if (method == "POST") {
                 val ct = if (contentType.isEmpty()) "application/x-www-form-urlencoded" else contentType
@@ -281,13 +327,13 @@ class WebAppInterface(private val context: Context) {
             if (data.isEmpty()) {
                 throw java.io.IOException("服务器未返回任何数据")
             }
-            return parseAndBuildResult(data)
+            return parseAndBuildResult(data, url)
         } finally {
             try { socket?.close() } catch (_: Exception) {}
         }
     }
 
-    private fun parseAndBuildResult(raw: ByteArray): String {
+    private fun parseAndBuildResult(raw: ByteArray, requestUrl: String): String {
         var start = 0
         while (start < raw.size &&
             (raw[start] == 0x0d.toByte() || raw[start] == 0x0a.toByte())
@@ -329,6 +375,9 @@ class WebAppInterface(private val context: Context) {
             if (k == "transfer-encoding" && v.contains("chunked", true)) isChunked = true
             if (k == "content-encoding" && v.contains("gzip", true)) isGzip = true
             if (k == "content-type") contentType = v
+            if (k == "set-cookie") {
+                try { CookieManager.getInstance().setCookie(requestUrl, v) } catch (e: Exception) {}
+            }
         }
 
         if (isChunked) bodyBytes = dechunk(bodyBytes)
