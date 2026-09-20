@@ -1,22 +1,35 @@
 package com.webshare.app
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.os.Handler
 import android.os.Looper
+import android.provider.OpenableColumns
+import android.util.Log
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
+import okio.BufferedSink
+import okio.source
 import org.json.JSONObject
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.io.OutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.net.URL
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -48,6 +61,9 @@ class WebAppInterface(private val context: Context) {
     private val mainHandler = Handler(Looper.getMainLooper())
 
     private val executor: ExecutorService = Executors.newCachedThreadPool()
+
+    /** 用户在系统文件选择器里选过的文件：文件名(+大小) -> content uri，供 multipart 上传取内容 */
+    private val pickedFiles = ConcurrentHashMap<String, Uri>()
 
     fun setSharedContent(text: String, type: String) {
         sharedText = text
@@ -112,6 +128,112 @@ class WebAppInterface(private val context: Context) {
     @JavascriptInterface
     fun httpGetH(url: String, callback: String, headersJson: String) {
         enqueue(url, "GET", "", "", callback, headersJson)
+    }
+
+    /**
+     * 带文件的表单上传（网页里的 <input type="file"> + FormData）。
+     * partsJson: {"fields":[{"name":..,"value":..}],"files":[{"name":..,"filename":..,"size":..}]}
+     * 文件内容按「文件名+大小」到用户刚选过的文件里找，全程流式读取，不经过 base64。
+     */
+    @JavascriptInterface
+    fun httpPostForm(url: String, partsJson: String, callback: String) {
+        enqueueTask(callback) { executeMultipart(url, partsJson) }
+    }
+
+    /** 读剪贴板文本（非安全上下文里网页拿不到 navigator.clipboard，只能走桥接） */
+    @JavascriptInterface
+    fun readClipboard(): String {
+        return try {
+            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            val clip = cm.primaryClip ?: return ""
+            if (clip.itemCount <= 0) return ""
+            clip.getItemAt(0).coerceToText(context)?.toString() ?: ""
+        } catch (e: Exception) {
+            ""
+        }
+    }
+
+    /** 写剪贴板文本，返回是否成功 */
+    @JavascriptInterface
+    fun copyText(text: String): Boolean {
+        return try {
+            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            mainHandler.post {
+                try {
+                    cm.setPrimaryClip(ClipData.newPlainText("网页文本", text))
+                } catch (_: Exception) {}
+            }
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /** 网页里的 window.open / target=_blank：用系统浏览器打开（不占本应用窗口） */
+    @JavascriptInterface
+    fun openExternal(url: String): Boolean {
+        if (!url.startsWith("http://", true) && !url.startsWith("https://", true)) return false
+        return try {
+            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(intent)
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /**
+     * 记录用户通过系统文件选择器选中的文件。
+     * 网页里 File 对象的 name/size 在 multipart 上传时用来把内容找回来。
+     */
+    fun registerPickedFiles(uris: List<Uri>) {
+        pickedFiles.clear()
+        for (uri in uris) {
+            try {
+                var name: String? = null
+                var size = -1L
+                context.contentResolver.query(
+                    uri,
+                    arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE),
+                    null, null, null
+                )?.use { c ->
+                    if (c.moveToFirst()) {
+                        val nameIdx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                        if (nameIdx >= 0 && !c.isNull(nameIdx)) name = c.getString(nameIdx)
+                        val sizeIdx = c.getColumnIndex(OpenableColumns.SIZE)
+                        if (sizeIdx >= 0 && !c.isNull(sizeIdx)) size = c.getLong(sizeIdx)
+                    }
+                }
+                val fileName = name ?: uri.lastPathSegment ?: continue
+                pickedFiles[fileKey(fileName, size)] = uri
+                pickedFiles[fileKey(fileName, -1L)] = uri
+                pickedFiles[fileName.lowercase()] = uri
+                Log.d(TAG, "picked file registered: name=$fileName size=$size uri=$uri")
+            } catch (e: Exception) {
+                Log.w(TAG, "failed to register picked file $uri", e)
+            }
+        }
+    }
+
+    private fun fileKey(name: String, size: Long) = name.lowercase() + "|" + size
+
+    private fun findPickedFile(name: String, size: Long): Uri? {
+        return pickedFiles[fileKey(name, size)]
+            ?: pickedFiles[fileKey(name, -1L)]
+            ?: pickedFiles[name.lowercase()]
+    }
+
+    private fun enqueueTask(callback: String, task: () -> String) {
+        executor.execute {
+            val result = try {
+                task()
+            } catch (e: Exception) {
+                failResult(e.message ?: "未知错误")
+            }
+            deliver(callback.ifEmpty { "window.onHttpPostResult" }, result)
+        }
     }
 
     private fun enqueue(
@@ -244,6 +366,93 @@ class WebAppInterface(private val context: Context) {
             val text = resp.body?.string() ?: ""
             return okResult(resp.code, text, resp.header("Content-Type") ?: "")
         }
+    }
+
+    /**
+     * 带文件的表单上传。文件内容从用户刚选中的 content uri 流式读出（不经过 base64），
+     * 请求本身依然走 App 的 DoH + TLS 通道。
+     */
+    private fun executeMultipart(url: String, partsJson: String): String {
+        val obj = try {
+            JSONObject(partsJson.ifEmpty { "{}" })
+        } catch (e: Exception) {
+            JSONObject()
+        }
+
+        val builder = MultipartBody.Builder().setType(MultipartBody.FORM)
+
+        obj.optJSONArray("fields")?.let { fields ->
+            for (i in 0 until fields.length()) {
+                val f = fields.optJSONObject(i) ?: continue
+                builder.addFormDataPart(f.optString("name"), f.optString("value"))
+            }
+        }
+
+        var fileCount = 0
+        obj.optJSONArray("files")?.let { files ->
+            for (i in 0 until files.length()) {
+                val f = files.optJSONObject(i) ?: continue
+                val field = f.optString("name")
+                val fileName = f.optString("filename")
+                val size = f.optLong("size", -1L)
+                val uri = findPickedFile(fileName, size)
+                    ?: throw IOException("文件「$fileName」已失效，请重新选择文件")
+                val mime = context.contentResolver.getType(uri) ?: "application/octet-stream"
+                builder.addFormDataPart(
+                    field,
+                    fileName,
+                    ContentUriRequestBody(context.contentResolver, uri, mime)
+                )
+                Log.d(TAG, "upload part: field=$field name=$fileName uri=$uri")
+                fileCount++
+            }
+        }
+
+        if (fileCount == 0) throw IOException("没有可上传的文件")
+
+        val body = builder.build()
+        val headers = linkedMapOf<String, String>()
+        obj.optJSONObject("headers")?.let { h ->
+            for (key in h.keys()) {
+                val skip = key.equals("Content-Type", true) || key.equals("Cookie", true) ||
+                    key.equals("Content-Length", true) || key.equals("Host", true) ||
+                    key.equals("Connection", true) || key.equals("Accept-Encoding", true)
+                if (!skip) headers[key] = h.optString(key)
+            }
+        }
+        if (headers.keys.none { it.equals("User-Agent", true) }) headers["User-Agent"] = UA
+
+        // 网页可能是 http:// 源(被 WebView 降级过)，而站点实际只开 TLS：
+        // 明文 POST 会被服务器重置，所以失败后换协议再试一次，和 GET 通道一致。
+        val candidates = listOfNotNull(url, swapScheme(url))
+        var lastError: Exception? = null
+        for (candidate in candidates) {
+            try {
+                return postMultipart(candidate, body, headers)
+            } catch (e: Exception) {
+                Log.w(TAG, "multipart post failed: $candidate (${e.message})")
+                lastError = e
+            }
+        }
+        throw (lastError ?: IOException("上传失败"))
+    }
+
+    private fun postMultipart(
+        url: String,
+        body: MultipartBody,
+        headers: Map<String, String>
+    ): String {
+        val builder = Request.Builder().url(url).post(body)
+        for ((k, v) in headers) builder.header(k, v)
+        buildClient().newCall(builder.build()).execute().use { resp ->
+            return okResult(resp.code, resp.body?.string() ?: "", resp.header("Content-Type") ?: "")
+        }
+    }
+
+    private fun swapScheme(url: String): String? = when {
+        url.startsWith("https://", true) -> url.replaceFirst("https://", "http://", true)
+        url.startsWith("http://", true) -> url.replaceFirst("http://", "https://", true)
+        else -> null
     }
 
     private fun executeWithRawSocket(
@@ -411,5 +620,65 @@ class WebAppInterface(private val context: Context) {
             pos = chunkEnd + 2
         }
         return baos.toByteArray()
+    }
+
+    /** 直接把 content uri 的内容流式写进 multipart，避免大文件进内存 */
+    private class ContentUriRequestBody(
+        private val resolver: android.content.ContentResolver,
+        private val uri: Uri,
+        private val mime: String
+    ) : RequestBody() {
+
+        private var resolvedLength = -1L
+        private var lengthResolved = false
+
+        override fun contentType() = mime.toMediaTypeOrNull()
+
+        /**
+         * Content-Length 必须和实际写入的字节数一致，否则服务器会认为协议错误直接重置连接。
+         * 所以不用 provider 报的 SIZE，而是先取文件描述符长度（免读内容），取不到再实测一遍。
+         */
+        override fun contentLength(): Long {
+            if (!lengthResolved) {
+                lengthResolved = true
+                resolvedLength = try {
+                    val afd = resolver.openAssetFileDescriptor(uri, "r")
+                    val len = afd?.length ?: -1L
+                    try { afd?.close() } catch (_: Exception) {}
+                    if (len >= 0) len else countBytes()
+                } catch (e: Exception) {
+                    -1L
+                }
+            }
+            return resolvedLength
+        }
+
+        private fun countBytes(): Long {
+            return try {
+                resolver.openInputStream(uri)?.use { input ->
+                    var total = 0L
+                    val buf = ByteArray(64 * 1024)
+                    while (true) {
+                        val n = input.read(buf)
+                        if (n <= 0) break
+                        total += n
+                    }
+                    total
+                } ?: -1L
+            } catch (e: Exception) {
+                -1L
+            }
+        }
+
+        override fun writeTo(sink: BufferedSink) {
+            val input = resolver.openInputStream(uri) ?: throw IOException("无法读取所选文件")
+            input.use { sink.writeAll(it.source()) }
+        }
+    }
+
+    companion object {
+        private const val TAG = "WebShareApp"
+        private const val UA = "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 " +
+            "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
     }
 }

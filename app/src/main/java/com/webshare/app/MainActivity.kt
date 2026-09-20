@@ -1,11 +1,16 @@
 package com.webshare.app
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.util.Log
 import android.view.View
+import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
@@ -17,6 +22,7 @@ import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import com.google.android.material.floatingactionbutton.FloatingActionButton
 
 class MainActivity : AppCompatActivity() {
@@ -32,6 +38,67 @@ class MainActivity : AppCompatActivity() {
     private var currentSharedType: String = "none"
 
     private var settingsLauncher: ActivityResultLauncher<Intent>? = null
+
+    /** 网页里 <input type="file"> 触发的选择回调，选中后必须回填 */
+    private var fileChooserCallback: ValueCallback<Array<Uri>>? = null
+
+    /** 等目录选好后才能开始的下载 */
+    private var pendingDownload: PendingDownload? = null
+
+    private data class PendingDownload(val url: String, val name: String, val mime: String)
+
+    private val dirPickerLauncher: ActivityResultLauncher<Uri?> = registerForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { treeUri ->
+        val req = pendingDownload ?: return@registerForActivityResult
+        pendingDownload = null
+        if (treeUri == null) return@registerForActivityResult
+
+        try {
+            contentResolver.takePersistableUriPermission(
+                treeUri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            )
+        } catch (e: Exception) {
+        }
+
+        val location = SaveLocationStore(this).remember(treeUri)
+        startDownload(req, location)
+    }
+
+    private val filePickerLauncher: ActivityResultLauncher<Intent> = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val callback = fileChooserCallback
+        fileChooserCallback = null
+        if (callback == null) return@registerForActivityResult
+
+        if (result.resultCode != RESULT_OK) {
+            callback.onReceiveValue(null)
+            return@registerForActivityResult
+        }
+
+        val data = result.data
+        val uris = mutableListOf<Uri>()
+        data?.clipData?.let { clip ->
+            for (i in 0 until clip.itemCount) {
+                clip.getItemAt(i)?.uri?.let { uris.add(it) }
+            }
+        }
+        if (uris.isEmpty()) data?.data?.let { uris.add(it) }
+
+        if (uris.isEmpty()) {
+            callback.onReceiveValue(null)
+            return@registerForActivityResult
+        }
+
+        // 记下用户选了哪些文件：上传时 FormData 里的文件要按 文件名+大小 找回真实内容
+        webAppInterface.registerPickedFiles(uris)
+        callback.onReceiveValue(uris.toTypedArray())
+    }
+
+    private val notificationPermissionLauncher: ActivityResultLauncher<String> =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
     private val shimJs: String by lazy {
         try {
@@ -96,6 +163,9 @@ class MainActivity : AppCompatActivity() {
 
     @SuppressLint("SetJavaScriptEnabled")
     private fun setupWebView() {
+        // 允许 Chrome 远程调试（chrome://inspect / adb forward），排查网页问题时必需
+        WebView.setWebContentsDebuggingEnabled(true)
+
         val settings = webView.settings
         settings.javaScriptEnabled = true
         settings.domStorageEnabled = true
@@ -111,6 +181,8 @@ class MainActivity : AppCompatActivity() {
         settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
         settings.javaScriptCanOpenWindowsAutomatically = true
         settings.setSupportMultipleWindows(false)
+        // 页面里的播放器在自动重试/转码完成后会直接 play()，此时用户手势可能已过期
+        settings.mediaPlaybackRequiresUserGesture = false
 
         webView.webViewClient = createWebViewClient()
         webView.webChromeClient = object : WebChromeClient() {
@@ -149,10 +221,118 @@ class MainActivity : AppCompatActivity() {
                     .show()
                 return true
             }
+
+            /** 网页 <input type="file">（本应用里的「上传」按钮）：不实现就完全没反应 */
+            override fun onShowFileChooser(
+                view: WebView?,
+                filePathCallback: ValueCallback<Array<Uri>>?,
+                fileChooserParams: FileChooserParams?
+            ): Boolean {
+                fileChooserCallback?.onReceiveValue(null)
+                fileChooserCallback = filePathCallback
+
+                val mimeTypes = fileChooserParams?.acceptTypes
+                    ?.filter { it.isNotBlank() && it != "*/*" }
+                    ?.toTypedArray()
+
+                val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type = if (mimeTypes.isNullOrEmpty()) "*/*" else mimeTypes[0]
+                    if (!mimeTypes.isNullOrEmpty()) {
+                        putExtra(Intent.EXTRA_MIME_TYPES, mimeTypes)
+                    }
+                    if (fileChooserParams?.mode == FileChooserParams.MODE_OPEN_MULTIPLE) {
+                        putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+                    }
+                }
+
+                return try {
+                    filePickerLauncher.launch(Intent.createChooser(intent, "选择文件"))
+                    true
+                } catch (e: Exception) {
+                    fileChooserCallback = null
+                    Toast.makeText(this@MainActivity, "无法打开文件选择器", Toast.LENGTH_SHORT).show()
+                    false
+                }
+            }
+        }
+
+        // 网页里的下载链接（<a download> / Content-Disposition: attachment）：
+        // 不设这个监听器，点击就是彻底没反应——WebView 自己不做下载
+        webView.setDownloadListener { url, _: String?, contentDisposition, mimeType, contentLength ->
+            onDownloadRequested(url, contentDisposition, mimeType, contentLength)
         }
 
         webView.addJavascriptInterface(webAppInterface, "Android")
         webAppInterface.attach(webView, settingsManager.dohEnabled, settingsManager.dohUrl)
+    }
+
+    /** 点击网页下载按钮：先问保存到哪个目录，再交给前台服务走 App 自己的 DNS/TLS 通道下载 */
+    private fun onDownloadRequested(
+        url: String,
+        contentDisposition: String?,
+        mimeType: String?,
+        contentLength: Long
+    ) {
+        Log.d(TAG, "download: url=$url cd=$contentDisposition mime=$mimeType len=$contentLength")
+
+        val scheme = try { Uri.parse(url).scheme?.lowercase() } catch (e: Exception) { null }
+        if (scheme != "http" && scheme != "https") {
+            // blob:/data: 这类地址要从网页里取内容，当前不走这条链路
+            Toast.makeText(
+                this,
+                "该链接不是普通文件地址（$scheme），暂不支持保存",
+                Toast.LENGTH_LONG
+            ).show()
+            return
+        }
+
+        val name = DownloadNaming.fileName(url, contentDisposition, mimeType)
+        val mime = mimeType?.takeIf { it.isNotBlank() } ?: "application/octet-stream"
+        val request = PendingDownload(url, name, mime)
+
+        val store = SaveLocationStore(this)
+        DownloadUi.showSaveDialog(
+            activity = this,
+            store = store,
+            fileName = name,
+            sizeText = if (contentLength > 0) DownloadService.fmtSize(contentLength) else null,
+            onStart = { location -> startDownload(request, location) },
+            onChooseOther = {
+                pendingDownload = request
+                try {
+                    dirPickerLauncher.launch(null)
+                } catch (e: Exception) {
+                    pendingDownload = null
+                    Toast.makeText(this, "无法打开目录选择器", Toast.LENGTH_SHORT).show()
+                }
+            }
+        )
+    }
+
+    private fun startDownload(request: PendingDownload, location: SaveLocation) {
+        val store = SaveLocationStore(this)
+        store.lastUsedId = location.id
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            try {
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            } catch (e: Exception) {
+            }
+        }
+
+        DownloadService.start(
+            context = this,
+            url = request.url,
+            name = request.name,
+            mime = request.mime,
+            treeUri = location.treeUri?.toString(),
+            referer = webView.url
+        )
+        Toast.makeText(this, "开始下载：${request.name}", Toast.LENGTH_SHORT).show()
     }
 
     private fun createWebViewClient(): WebViewClient {
@@ -318,5 +498,9 @@ class MainActivity : AppCompatActivity() {
             "utf-8",
             null
         )
+    }
+
+    companion object {
+        private const val TAG = "WebShareApp"
     }
 }

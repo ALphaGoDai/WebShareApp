@@ -1,6 +1,7 @@
 package com.webshare.app
 
 import android.content.Intent
+import android.util.Log
 import android.webkit.CookieManager
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -73,7 +74,16 @@ open class DohWebViewClient(
         return try {
             smartFetch(urlStr, host, request.requestHeaders, request.isForMainFrame)
         } catch (e: Exception) {
-            makeErrorResponse(buildErrorText(urlStr, host, e))
+            if (request.isForMainFrame) {
+                Log.w(TAG, "main frame failed: $urlStr (${e.message})")
+                makeErrorResponse(buildErrorText(urlStr, host, e))
+            } else {
+                // 子资源（图片/视频/脚本）失败时不要把 HTML 错误页塞回去：
+                // <video> 收到 HTML 会报“解码失败”而不是网络错误，页面上的重试/转码逻辑会被误导。
+                // 返回 null 让 WebView 按自己的方式失败。
+                Log.w(TAG, "subresource failed: $urlStr (${e.message})")
+                null
+            }
         }
     }
 
@@ -559,6 +569,10 @@ open class DohWebViewClient(
         } catch (e: Exception) {
         }
         return true
+    }
+
+    companion object {
+        private const val TAG = "WebShareApp"
     }
 }
 
