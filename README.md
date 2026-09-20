@@ -119,6 +119,34 @@ var sharedType = Android.getSharedType();    // 获取分享类型
 var settings = Android.getSettings();        // 获取应用设置(JSON)
 ```
 
+**方式 D：Android.httpPost / Android.httpGet 网络桥接**
+
+由于部分网络环境下系统 DNS 被劫持，WebView 原生 POST/fetch 请求会失败。网页可改用 App 提供的网络桥接（自动走 App 的自定义 DNS + TLS，且兼容 reason phrase 缺失的服务器）：
+
+```javascript
+// POST（异步，回调收到结果）
+Android.httpPost(
+    "https://send.nbhonghong.top:7777/api",     // 请求地址
+    "url=https://example.com&foo=bar",           // 请求体
+    "application/x-www-form-urlencoded",         // Content-Type（JSON 则传 "application/json"）
+    "onPostDone"                                  // 回调函数名（全局函数，可传 "" 用默认 window.onHttpPostResult）
+);
+
+function onPostDone(r) {
+    // r = { ok: true, status: 200, data: "响应体文本", error: null }
+    if (r.ok) {
+        console.log('HTTP', r.status, r.data);
+    } else {
+        console.error('失败:', r.error);
+    }
+}
+
+// GET（异步，回调格式相同）
+Android.httpGet("https://send.nbhonghong.top:7777/api?url=xxx", "onGetDone");
+```
+
+> 说明：桥接请求全部走 `shouldInterceptRequest` 同一套 DNS/TLS 逻辑（DoH 优先、明文被拒自动切 TLS），因此和主页面加载行为一致。回调在主线程执行，可安全操作 DOM。
+
 ### 3. 配置安全 DNS (DoH)
 
 1. 在设置页面打开"使用安全 DNS"开关

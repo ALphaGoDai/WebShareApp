@@ -145,6 +145,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         webView.addJavascriptInterface(webAppInterface, "Android")
+        webAppInterface.attach(webView, settingsManager.dohEnabled, settingsManager.dohUrl)
     }
 
     private fun createWebViewClient(): WebViewClient {
@@ -276,6 +277,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun reloadWebView() {
         webView.webViewClient = createWebViewClient()
+        webAppInterface.attach(webView, settingsManager.dohEnabled, settingsManager.dohUrl)
         loadUrl()
     }
 
