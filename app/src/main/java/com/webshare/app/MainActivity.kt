@@ -2,6 +2,7 @@ package com.webshare.app
 
 import android.annotation.SuppressLint
 import android.content.Intent
+import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Bundle
 import android.view.View
@@ -31,6 +32,16 @@ class MainActivity : AppCompatActivity() {
     private var currentSharedType: String = "none"
 
     private var settingsLauncher: ActivityResultLauncher<Intent>? = null
+
+    private val shimJs: String by lazy {
+        try {
+            assets.open("shim.js").bufferedReader().use { it.readText() }
+        } catch (e: Exception) { "" }
+    }
+
+    private fun injectShim(view: WebView?) {
+        if (shimJs.isNotEmpty()) view?.evaluateJavascript(shimJs, null)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -169,8 +180,14 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) { "" }
 
         return object : DohWebViewClient(dohEnabled, dohUrl, forceHttpHost, configuredHost, appVersion) {
+            override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                super.onPageStarted(view, url, favicon)
+                injectShim(view)
+            }
+
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
+                injectShim(view)
                 if (currentSharedText != null) {
                     val js = buildString {
                         append("if(typeof window.onSharedContent==='function'){")

@@ -147,6 +147,19 @@ Android.httpGet("https://send.nbhonghong.top:7777/api?url=xxx", "onGetDone");
 
 > 说明：桥接请求全部走 `shouldInterceptRequest` 同一套 DNS/TLS 逻辑（DoH 优先、明文被拒自动切 TLS），因此和主页面加载行为一致。回调在主线程执行，可安全操作 DOM。
 
+**方式 E：自动接管 fetch / XMLHttpRequest（推荐，网页零修改）**
+
+v1.0.11 起，App 在页面加载时自动注入接管脚本，网页无需任何修改：
+
+- 页面里的 `fetch` / `XMLHttpRequest`（含 jQuery `$.ajax`）先走 WebView 原生请求
+- 原生请求网络级失败时（典型场景：系统 DNS 被劫持到 127.0.0.1），自动改走 App 内部 DoH + TLS 通道重发
+- 返回值/事件与原生一致（Promise、`onload`、`onerror`、`responseText` 等），对网页代码完全透明
+
+已知限制：
+- `FormData` 带文件字段的 POST 无法桥接（保持失败）
+- WebSocket、原生表单提交（`<form action>` 跳转）不在接管范围
+- 请求体支持：字符串、`URLSearchParams`、无文件 `FormData`、`Blob` 文本
+
 ### 3. 配置安全 DNS (DoH)
 
 1. 在设置页面打开"使用安全 DNS"开关
@@ -173,8 +186,8 @@ Android.httpGet("https://send.nbhonghong.top:7777/api?url=xxx", "onGetDone");
 当 DoH 开启时，应用通过 `WebViewClient.shouldInterceptRequest` 拦截 WebView 的 GET 请求，使用 OkHttp 发起请求并通过自定义 DNS 解析器（`DohDnsResolver`）进行域名解析。DNS 查询通过 HTTPS 发送到配置的 DoH 服务器，实现加密 DNS 查询。
 
 **注意事项：**
-- DoH 仅对 GET 请求生效（Android WebView 的 `shouldInterceptRequest` 不提供 POST 请求体）
-- POST 请求会使用系统默认 DNS
+- WebView 的 `shouldInterceptRequest` 仅拦截 GET 请求（主页面与子资源加载）
+- JS 发起的 POST 等请求：v1.0.11 起通过自动注入脚本接管 fetch/XHR，原生请求失败时走 App 内部 DoH 通道（见"方式 E"）
 - Cookie 通过 `CookieManager` 在 WebView 和 OkHttp 之间自动同步
 
 ### 最低系统要求

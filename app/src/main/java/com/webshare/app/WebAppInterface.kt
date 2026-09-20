@@ -41,6 +41,9 @@ class WebAppInterface(private val context: Context) {
     @Volatile
     private var dohUrl: String = ""
 
+    @Volatile
+    private var cachedResolver: DohDnsResolver? = null
+
     private val mainHandler = Handler(Looper.getMainLooper())
 
     private val executor: ExecutorService = Executors.newCachedThreadPool()
@@ -59,6 +62,9 @@ class WebAppInterface(private val context: Context) {
         webViewRef = webView
         this.dohEnabled = dohEnabled
         this.dohUrl = dohUrl
+        cachedResolver = if (dohEnabled && dohUrl.isNotEmpty()) {
+            try { DohDnsResolver(dohUrl) } catch (e: Exception) { null }
+        } else null
     }
 
     @JavascriptInterface
@@ -79,21 +85,18 @@ class WebAppInterface(private val context: Context) {
 
     /**
      * POST 请求（走 App 的自定义 DNS + TLS，绕过系统 DNS 劫持）。
-     * 结果通过回调返回（异步），回调收到一个对象:
-     *   { ok: true/false, status: 200, data: "响应体文本", error: null }
-     * callback 须为全局函数名，如 "onPostDone"。
-     * 网页用法:
+     * 异步回调，callback 为全局函数名:
      *   Android.httpPost("https://site/api", "a=1&b=2",
      *                   "application/x-www-form-urlencoded", "onPostDone")
-     *   function onPostDone(r){ if(r.ok) alert(r.status) }
-     * callback 可传空字符串，则默认调用 window.onHttpPostResult。
+     *   function onPostDone(r){ r = {ok, status, data, contentType, error} }
+     * callback 传空字符串则调用 window.onHttpPostResult。
      */
     @JavascriptInterface
     fun httpPost(url: String, body: String, contentType: String, callback: String) {
         enqueue(url, "POST", body, contentType, callback)
     }
 
-    /** GET 版本，用法同 httpPost（body 传空字符串）。 */
+    /** GET 版本，用法同 httpPost（body/contentType 传空字符串）。 */
     @JavascriptInterface
     fun httpGet(url: String, callback: String) {
         enqueue(url, "GET", "", "", callback)
@@ -116,11 +119,12 @@ class WebAppInterface(private val context: Context) {
         }
     }
 
-    private fun okResult(status: Int, data: String): String {
+    private fun okResult(status: Int, data: String, contentType: String): String {
         return JSONObject().apply {
             put("ok", true)
             put("status", status)
             put("data", data)
+            put("contentType", contentType)
             put("error", JSONObject.NULL)
         }.toString()
     }
@@ -145,9 +149,9 @@ class WebAppInterface(private val context: Context) {
     }
 
     private fun resolveHost(host: String): String {
-        if (!dohEnabled || dohUrl.isEmpty()) return host
+        val r = cachedResolver ?: return host
         return try {
-            DohDnsResolver(dohUrl).lookup(host).firstOrNull()?.hostAddress ?: host
+            r.lookup(host).firstOrNull()?.hostAddress ?: host
         } catch (e: Exception) {
             host
         }
@@ -176,9 +180,7 @@ class WebAppInterface(private val context: Context) {
         val cb = OkHttpClient.Builder()
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(15, TimeUnit.SECONDS)
-        if (dohEnabled && dohUrl.isNotEmpty()) {
-            try { cb.dns(DohDnsResolver(dohUrl)) } catch (e: Exception) {}
-        }
+        cachedResolver?.let { cb.dns(it) }
         return cb.build()
     }
 
@@ -203,7 +205,7 @@ class WebAppInterface(private val context: Context) {
         )
         buildClient().newCall(builder.build()).execute().use { resp ->
             val text = resp.body?.string() ?: ""
-            return okResult(resp.code, text)
+            return okResult(resp.code, text, resp.header("Content-Type") ?: "")
         }
     }
 
@@ -229,7 +231,6 @@ class WebAppInterface(private val context: Context) {
             raw.soTimeout = 15000
 
             val target: Socket = if (useTls || parsed.protocol.equals("https", true)) {
-                // For https URLs always wrap in TLS; useTls=true forces it even for http://
                 val factory = SSLSocketFactory.getDefault() as SSLSocketFactory
                 val ssl = factory.createSocket(raw, host, port, true) as SSLSocket
                 val params = ssl.sslParameters
@@ -318,6 +319,7 @@ class WebAppInterface(private val context: Context) {
 
         var isChunked = false
         var isGzip = false
+        var contentType = ""
         for (j in 1 until lines.size) {
             val line = lines[j]
             val idx = line.indexOf(':')
@@ -326,6 +328,7 @@ class WebAppInterface(private val context: Context) {
             val v = line.substring(idx + 1).trim()
             if (k == "transfer-encoding" && v.contains("chunked", true)) isChunked = true
             if (k == "content-encoding" && v.contains("gzip", true)) isGzip = true
+            if (k == "content-type") contentType = v
         }
 
         if (isChunked) bodyBytes = dechunk(bodyBytes)
@@ -335,7 +338,7 @@ class WebAppInterface(private val context: Context) {
             } catch (e: Exception) {}
         }
 
-        return okResult(status, String(bodyBytes, Charsets.UTF_8))
+        return okResult(status, String(bodyBytes, Charsets.UTF_8), contentType)
     }
 
     private fun dechunk(data: ByteArray): ByteArray {
