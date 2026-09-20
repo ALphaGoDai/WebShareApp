@@ -1,5 +1,6 @@
 package com.webshare.app
 
+import android.annotation.SuppressLint
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
@@ -9,6 +10,7 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.ProgressBar
+import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
@@ -21,6 +23,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var webView: WebView
     private lateinit var progressBar: ProgressBar
     private lateinit var fabSettings: FloatingActionButton
+    private lateinit var fabRefresh: FloatingActionButton
     private lateinit var settingsManager: SettingsManager
     private lateinit var webAppInterface: WebAppInterface
 
@@ -39,6 +42,7 @@ class MainActivity : AppCompatActivity() {
         webView = findViewById(R.id.webView)
         progressBar = findViewById(R.id.progressBar)
         fabSettings = findViewById(R.id.fabSettings)
+        fabRefresh = findViewById(R.id.fabRefresh)
 
         setupWebView()
         setupFab()
@@ -83,6 +87,7 @@ class MainActivity : AppCompatActivity() {
         loadUrl()
     }
 
+    @SuppressLint("SetJavaScriptEnabled")
     private fun setupWebView() {
         val settings = webView.settings
         settings.javaScriptEnabled = true
@@ -99,13 +104,6 @@ class MainActivity : AppCompatActivity() {
         settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
         settings.javaScriptCanOpenWindowsAutomatically = true
         settings.setSupportMultipleWindows(false)
-        // Disable WebView HTTPS upgrade
-        try {
-            val experimental = webView.settings.javaClass
-                .getMethod("setHttpsUpgradeEnabled", Boolean::class.javaPrimitiveType)
-            experimental.invoke(webView.settings, false)
-        } catch (e: Exception) {
-        }
 
         webView.webViewClient = createWebViewClient()
         webView.webChromeClient = object : WebChromeClient() {
@@ -199,6 +197,36 @@ class MainActivity : AppCompatActivity() {
         fabSettings.setOnClickListener {
             settingsLauncher?.launch(Intent(this, SettingsActivity::class.java))
         }
+
+        // Refresh: tap = normal refresh, long press = force refresh (clear cache)
+        fabRefresh.setOnClickListener {
+            webView.reload()
+        }
+
+        fabRefresh.setOnLongClickListener {
+            // Visual feedback for long press
+            fabRefresh.alpha = 0.5f
+            Toast.makeText(this, "正在清除缓存并刷新...", Toast.LENGTH_SHORT).show()
+
+            // Clear all caches
+            webView.clearCache(true)
+            webView.clearHistory()
+            // Also clear cookies for a full force refresh
+            android.webkit.CookieManager.getInstance().removeAllCookies { }
+            android.webkit.CookieManager.getInstance().flush()
+
+            // Reload with cache bypass
+            webView.settings.cacheMode = WebSettings.LOAD_NO_CACHE
+            webView.reload()
+
+            // Reset cache mode after a delay
+            webView.postDelayed({
+                webView.settings.cacheMode = WebSettings.LOAD_DEFAULT
+                fabRefresh.alpha = 1.0f
+            }, 3000)
+
+            true
+        }
     }
 
     private fun setupBackNavigation() {
@@ -233,11 +261,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun appendSharedContent(baseUrl: String, shared: String): String {
-        // 如果 URL 包含 {shared} 占位符，替换它
         if (baseUrl.contains("{shared}")) {
             return baseUrl.replace("{shared}", Uri.encode(shared))
         }
-        // 否则作为查询参数附加
         val separator = if (baseUrl.contains("?")) "&" else "?"
         return "$baseUrl${separator}shared=${Uri.encode(shared)}"
     }
