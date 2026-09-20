@@ -154,7 +154,8 @@ class SettingsActivity : AppCompatActivity() {
                 Diagnostics.run(
                     targetUrl,
                     switchDoh.isChecked,
-                    etDohUrl.text?.toString()?.trim() ?: ""
+                    etDohUrl.text?.toString()?.trim() ?: "",
+                    packageManager.getPackageInfo(packageName, 0).versionName ?: ""
                 )
             } catch (e: Exception) {
                 "诊断异常: ${e.message}"

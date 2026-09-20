@@ -16,10 +16,11 @@ object Diagnostics {
     private const val UA = "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 " +
         "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
 
-    fun run(targetUrl: String, dohEnabled: Boolean, dohUrl: String): String {
+    fun run(targetUrl: String, dohEnabled: Boolean, dohUrl: String, appVersion: String = ""): String {
         val sb = StringBuilder()
         val ts = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.CHINA).format(Date())
         sb.append("诊断时间: ").append(ts).append("\n")
+        if (appVersion.isNotEmpty()) sb.append("App版本: v").append(appVersion).append("\n")
         sb.append("目标: ").append(targetUrl).append("\n\n")
 
         val parsed = try {

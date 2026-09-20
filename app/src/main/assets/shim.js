@@ -107,6 +107,15 @@
   }
 
   // ---------- fetch: native first, bridge fallback ----------
+  function toAbs(u) {
+    if (!u) return null;
+    if (/^https?:/i.test(u)) return u;
+    try {
+      var abs = new URL(u, location.href).href;
+      return /^https?:/i.test(abs) ? abs : null;
+    } catch (e) { return null; }
+  }
+
   if (typeof window.fetch === 'function') {
     var origFetch = window.fetch.bind(window);
     window.__wsOrigFetch = origFetch;
@@ -120,7 +129,8 @@
           url = input.url;
           if (!init && input.method) opts = { method: input.method, headers: input.headers };
         }
-        if (!url || !/^https?:/i.test(url)) throw err;
+        url = toAbs(url);
+        if (!url) throw err;
         var method = String(opts.method || 'GET').toUpperCase();
         var ct = headerGet(opts.headers, 'content-type') || '';
         return bodyToText(opts.body)
@@ -214,11 +224,13 @@
 
       function retry() {
         if (retried) { finishError(); return; }
+        var abs = toAbs(url);
+        if (!abs) { finishError(); return; }
         retried = true;
         var ct = reqHeaders['content-type'] || '';
         bodyToText(sentBody)
           .then(function(text) {
-            return callBridge(method, url, text, method === 'GET' ? '' : ct);
+            return callBridge(method, abs, text, method === 'GET' ? '' : ct);
           })
           .then(finishBridge)
           .catch(finishError);
@@ -231,13 +243,12 @@
       };
       native.onload = function() {
         if (retried) return;
-        if (native.status === 0 && /^https?:/i.test(url)) { retry(); return; }
+        if (native.status === 0) { retry(); return; }
         finishNative();
       };
       native.onerror = function() {
         if (retried) return;
-        if (/^https?:/i.test(url)) { retry(); return; }
-        finishError();
+        retry();
       };
       native.onabort = function() {
         if (retried) return;
