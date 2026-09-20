@@ -31,7 +31,6 @@ class SettingsActivity : AppCompatActivity() {
         layoutDohUrl = findViewById(R.id.layoutDohUrl)
         btnSave = findViewById(R.id.btnSave)
 
-        // 加载当前设置
         etUrl.setText(settingsManager.url)
         switchDoh.isChecked = settingsManager.dohEnabled
         etDohUrl.setText(settingsManager.dohUrl)
@@ -51,9 +50,13 @@ class SettingsActivity : AppCompatActivity() {
                 return@setOnClickListener
             }
 
-            if (dohEnabled && dohUrl.isNotEmpty() && !dohUrl.startsWith("https://")) {
-                Snackbar.make(btnSave, "DNS 服务器地址需要以 https:// 开头", Snackbar.LENGTH_LONG).show()
-                return@setOnClickListener
+            if (dohEnabled && dohUrl.isNotEmpty()) {
+                val isDoh = dohUrl.startsWith("https://")
+                val isIp = DohDnsResolver.isIpAddress(dohUrl)
+                if (!isDoh && !isIp) {
+                    Snackbar.make(btnSave, "DNS 服务器需要是 https:// 开头的 DoH 地址或纯 IP 地址", Snackbar.LENGTH_LONG).show()
+                    return@setOnClickListener
+                }
             }
 
             settingsManager.url = url
@@ -64,7 +67,7 @@ class SettingsActivity : AppCompatActivity() {
             finish()
         }
 
-        // 快速填充常用 DoH 服务器
+        // DoH servers
         findViewById<TextView>(R.id.tvGoogleDns)?.setOnClickListener {
             etDohUrl.setText("https://dns.google/dns-query")
         }
@@ -76,6 +79,20 @@ class SettingsActivity : AppCompatActivity() {
         }
         findViewById<TextView>(R.id.tvDnsPod)?.setOnClickListener {
             etDohUrl.setText("https://doh.pub/dns-query")
+        }
+
+        // UDP DNS servers
+        findViewById<TextView>(R.id.tvDnsPodUdp)?.setOnClickListener {
+            etDohUrl.setText("119.29.29.29")
+        }
+        findViewById<TextView>(R.id.tvAliUdp)?.setOnClickListener {
+            etDohUrl.setText("223.5.5.5")
+        }
+        findViewById<TextView>(R.id.tvHuaweiDns)?.setOnClickListener {
+            etDohUrl.setText("117.50.11.11")
+        }
+        findViewById<TextView>(R.id.tvGoogleUdp)?.setOnClickListener {
+            etDohUrl.setText("8.8.8.8")
         }
     }
 

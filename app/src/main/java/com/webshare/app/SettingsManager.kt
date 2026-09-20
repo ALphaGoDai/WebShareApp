@@ -23,13 +23,14 @@ class SettingsManager(context: Context) {
 
     private fun migrateSettings() {
         val version = prefs.getInt(KEY_SETTINGS_VERSION, 0)
-        if (version < 1) {
+        if (version < 2) {
             val oldDoh = prefs.getString(KEY_DOH_URL, "") ?: ""
+            // Migrate from any previous version: ensure DNSPod default
             if (oldDoh.isEmpty() || oldDoh.contains("alidns")) {
                 prefs.edit().putString(KEY_DOH_URL, DEFAULT_DOH_URL).apply()
             }
             prefs.edit().putBoolean(KEY_DOH_ENABLED, true).apply()
-            prefs.edit().putInt(KEY_SETTINGS_VERSION, 1).apply()
+            prefs.edit().putInt(KEY_SETTINGS_VERSION, 2).apply()
         }
     }
 

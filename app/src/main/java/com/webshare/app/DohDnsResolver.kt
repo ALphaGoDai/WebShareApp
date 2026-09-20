@@ -9,25 +9,25 @@ import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
+import java.net.DatagramPacket
+import java.net.DatagramSocket
 import java.net.InetAddress
+import java.net.InetSocketAddress
 import java.net.UnknownHostException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import kotlin.random.Random
 
-class DohDnsResolver(private val dohUrl: String) : Dns {
+class DohDnsResolver(private val dnsServer: String) : Dns {
 
-    private val dohClient: OkHttpClient
+    private val isUdpMode: Boolean = isIpAddress(dnsServer)
+    private val dohHost: String = if (!isUdpMode) {
+        try { java.net.URL(dnsServer).host } catch (e: Exception) { "" }
+    } else ""
 
-    init {
-        val dohHost = try {
-            java.net.URL(dohUrl).host
-        } catch (e: Exception) {
-            ""
-        }
-
+    private val dohClient: OkHttpClient by lazy {
         val bootstrapDns = BootstrapDns(dohHost)
-        dohClient = OkHttpClient.Builder()
+        OkHttpClient.Builder()
             .dns(bootstrapDns)
             .connectTimeout(5, TimeUnit.SECONDS)
             .readTimeout(5, TimeUnit.SECONDS)
@@ -35,7 +35,6 @@ class DohDnsResolver(private val dohUrl: String) : Dns {
     }
 
     private val cache = ConcurrentHashMap<String, CacheEntry>()
-
     private data class CacheEntry(val addresses: List<InetAddress>, val expiry: Long)
 
     override fun lookup(hostname: String): List<InetAddress> {
@@ -44,39 +43,84 @@ class DohDnsResolver(private val dohUrl: String) : Dns {
             return cached.addresses
         }
 
+        // Try primary method (DoH or UDP)
         try {
-            val query = buildDnsQuery(hostname)
-            val request = Request.Builder()
-                .url(dohUrl)
-                .post(query.toRequestBody("application/dns-message".toMediaType()))
-                .header("Accept", "application/dns-message")
-                .build()
-
-            dohClient.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    throw UnknownHostException("DoH request failed: ${response.code}")
-                }
-                val body = response.body?.bytes()
-                    ?: throw UnknownHostException("DoH response empty")
-
-                val ips = parseDnsResponse(body)
-                if (ips.isEmpty()) {
-                    throw UnknownHostException("No A record for $hostname")
-                }
-
+            val ips = if (isUdpMode) {
+                queryUdpDns(hostname, dnsServer)
+            } else {
+                queryDoh(hostname)
+            }
+            if (ips.isNotEmpty()) {
                 val addresses = ips.map { InetAddress.getByName(it) }
                 cache[hostname] = CacheEntry(addresses, System.currentTimeMillis() + CACHE_TTL)
                 return addresses
             }
         } catch (e: Exception) {
-            cache[hostname]?.let { return it.addresses }
-            try {
+            // Primary failed, try fallbacks below
+        }
+
+        // Fallback: try the other DNS method
+        try {
+            val fallbackIps = if (isUdpMode) {
+                // UDP failed, try system DNS
                 return Dns.SYSTEM.lookup(hostname)
-            } catch (e2: Exception) {
+            } else {
+                // DoH failed, try UDP to common Chinese DNS servers
+                queryUdpDns(hostname, "119.29.29.29")
             }
-            val ex = UnknownHostException(hostname)
-            ex.initCause(e)
-            throw ex
+            if (fallbackIps.isNotEmpty()) {
+                val addresses = fallbackIps.map { InetAddress.getByName(it) }
+                cache[hostname] = CacheEntry(addresses, System.currentTimeMillis() + CACHE_TTL)
+                return addresses
+            }
+        } catch (e: Exception) {
+        }
+
+        // Last resort: system DNS
+        cache[hostname]?.let { return it.addresses }
+        try {
+            return Dns.SYSTEM.lookup(hostname)
+        } catch (e2: Exception) {
+        }
+
+        throw UnknownHostException("Failed to resolve $hostname via all DNS methods")
+    }
+
+    private fun queryDoh(hostname: String): List<String> {
+        val query = buildDnsQuery(hostname)
+        val request = Request.Builder()
+            .url(dnsServer)
+            .post(query.toRequestBody("application/dns-message".toMediaType()))
+            .header("Accept", "application/dns-message")
+            .build()
+
+        dohClient.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                throw UnknownHostException("DoH HTTP ${response.code}")
+            }
+            val body = response.body?.bytes()
+                ?: throw UnknownHostException("DoH empty response")
+            return parseDnsResponse(body)
+        }
+    }
+
+    private fun queryUdpDns(hostname: String, serverIp: String): List<String> {
+        val query = buildDnsQuery(hostname)
+        val socket = DatagramSocket()
+        socket.soTimeout = 4000
+        try {
+            val addr = InetAddress.getByName(serverIp)
+            val sendPacket = DatagramPacket(query, query.size, addr, 53)
+            socket.send(sendPacket)
+
+            val recvBuffer = ByteArray(1024)
+            val recvPacket = DatagramPacket(recvBuffer, recvBuffer.size)
+            socket.receive(recvPacket)
+
+            val response = recvBuffer.copyOf(recvPacket.length)
+            return parseDnsResponse(response)
+        } finally {
+            socket.close()
         }
     }
 
@@ -85,11 +129,11 @@ class DohDnsResolver(private val dohUrl: String) : Dns {
         val dos = DataOutputStream(baos)
 
         dos.writeShort(Random.nextInt(65536))
-        dos.writeShort(0x0100)
-        dos.writeShort(1)
-        dos.writeShort(0)
-        dos.writeShort(0)
-        dos.writeShort(0)
+        dos.writeShort(0x0100) // RD=1
+        dos.writeShort(1)      // QDCOUNT
+        dos.writeShort(0)      // ANCOUNT
+        dos.writeShort(0)      // NSCOUNT
+        dos.writeShort(0)      // ARCOUNT
 
         val cleanDomain = domain.trimEnd('.')
         for (part in cleanDomain.split(".")) {
@@ -97,10 +141,10 @@ class DohDnsResolver(private val dohUrl: String) : Dns {
             dos.writeByte(bytes.size)
             dos.write(bytes)
         }
-        dos.writeByte(0)
+        dos.writeByte(0) // terminator
 
-        dos.writeShort(1)
-        dos.writeShort(1)
+        dos.writeShort(1) // QTYPE=A
+        dos.writeShort(1) // QCLASS=IN
 
         return baos.toByteArray()
     }
@@ -109,24 +153,29 @@ class DohDnsResolver(private val dohUrl: String) : Dns {
         val dis = DataInputStream(ByteArrayInputStream(data))
         val ips = mutableListOf<String>()
 
-        dis.readShort()
-        dis.readShort()
+        dis.readShort() // ID
+        val flags = dis.readShort().toInt() and 0xFFFF
+        val rcode = flags and 0x000F
         val qdcount = dis.readShort().toInt() and 0xFFFF
         val ancount = dis.readShort().toInt() and 0xFFFF
-        dis.readShort()
-        dis.readShort()
+        dis.readShort() // NSCOUNT
+        dis.readShort() // ARCOUNT
+
+        if (rcode != 0) {
+            return emptyList()
+        }
 
         for (i in 0 until qdcount) {
             skipName(dis)
-            dis.readShort()
-            dis.readShort()
+            dis.readShort() // QTYPE
+            dis.readShort() // QCLASS
         }
 
         for (i in 0 until ancount) {
             skipName(dis)
             val type = dis.readShort().toInt() and 0xFFFF
-            dis.readShort()
-            dis.readInt()
+            dis.readShort() // CLASS
+            dis.readInt()   // TTL
             val rdlength = dis.readShort().toInt() and 0xFFFF
 
             if (type == 1 && rdlength == 4) {
@@ -169,11 +218,11 @@ class DohDnsResolver(private val dohUrl: String) : Dns {
             "cloudflare-dns.com" to listOf("1.1.1.1", "1.0.0.1"),
             "doh.pub" to listOf("1.12.12.12", "120.53.53.53"),
             "doh.360.cn" to listOf("101.226.4.6", "218.30.118.6"),
-            "223.5.5.5" to listOf("223.5.5.5"),
-            "223.6.6.6" to listOf("223.6.6.6"),
-            "1.1.1.1" to listOf("1.1.1.1"),
-            "8.8.8.8" to listOf("8.8.8.8"),
         )
+
+        private val IP_REGEX = Regex("^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$")
+
+        fun isIpAddress(s: String): Boolean = IP_REGEX.matches(s)
     }
 
     private class BootstrapDns(private val dohHost: String) : Dns {

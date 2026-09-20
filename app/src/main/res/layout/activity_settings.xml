@@ -45,7 +45,7 @@
                     style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:hint="https://example.com">
+                    android:hint="http://example.com:port">
 
                     <com.google.android.material.textfield.TextInputEditText
                         android:id="@+id/etUrl"
@@ -85,7 +85,7 @@
                     android:id="@+id/switchDoh"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="使用安全 DNS (DoH)"
+                    android:text="使用自定义 DNS"
                     android:textSize="16sp"
                     android:textStyle="bold" />
 
@@ -93,7 +93,7 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="4dp"
-                    android:text="通过 DNS-over-HTTPS 加密 DNS 查询，防止 DNS 劫持和污染"
+                    android:text="通过 DoH (加密) 或 UDP (直连) 方式自定义 DNS 服务器，防止 DNS 劫持和污染。支持 DoH 地址 (https://开头) 或 DNS 服务器 IP。"
                     android:textSize="12sp"
                     android:textColor="?android:attr/textColorSecondary" />
 
@@ -109,7 +109,7 @@
                         style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:hint="DoH 服务器地址">
+                        android:hint="DoH 地址 或 DNS 服务器 IP">
 
                         <com.google.android.material.textfield.TextInputEditText
                             android:id="@+id/etDohUrl"
@@ -122,16 +122,17 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="12dp"
-                        android:text="常用 DoH 服务器（点击填充）："
+                        android:text="DoH 服务器 (加密, https:// 开头)："
                         android:textSize="12sp"
-                        android:textColor="?android:attr/textColorSecondary" />
+                        android:textColor="?android:attr/textColorSecondary"
+                        android:textStyle="bold" />
 
                     <TextView
-                        android:id="@+id/tvGoogleDns"
+                        android:id="@+id/tvDnsPod"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="4dp"
-                        android:text="Google: https://dns.google/dns-query"
+                        android:text="DNSPod: https://doh.pub/dns-query"
                         android:textSize="13sp"
                         android:textColor="@color/purple_500"
                         android:padding="8dp"
@@ -164,10 +165,68 @@
                         android:background="?android:attr/selectableItemBackground" />
 
                     <TextView
-                        android:id="@+id/tvDnsPod"
+                        android:id="@+id/tvGoogleDns"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:text="DNSPod: https://doh.pub/dns-query"
+                        android:text="Google: https://dns.google/dns-query"
+                        android:textSize="13sp"
+                        android:textColor="@color/purple_500"
+                        android:padding="8dp"
+                        android:clickable="true"
+                        android:focusable="true"
+                        android:background="?android:attr/selectableItemBackground" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
+                        android:text="UDP DNS 服务器 (直连, 填 IP)："
+                        android:textSize="12sp"
+                        android:textColor="?android:attr/textColorSecondary"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:id="@+id/tvHuaweiDns"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:text="华为 DNS: 117.50.11.11"
+                        android:textSize="13sp"
+                        android:textColor="@color/purple_500"
+                        android:padding="8dp"
+                        android:clickable="true"
+                        android:focusable="true"
+                        android:background="?android:attr/selectableItemBackground" />
+
+                    <TextView
+                        android:id="@+id/tvDnsPodUdp"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="DNSPod: 119.29.29.29"
+                        android:textSize="13sp"
+                        android:textColor="@color/purple_500"
+                        android:padding="8dp"
+                        android:clickable="true"
+                        android:focusable="true"
+                        android:background="?android:attr/selectableItemBackground" />
+
+                    <TextView
+                        android:id="@+id/tvAliUdp"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="阿里 DNS: 223.5.5.5"
+                        android:textSize="13sp"
+                        android:textColor="@color/purple_500"
+                        android:padding="8dp"
+                        android:clickable="true"
+                        android:focusable="true"
+                        android:background="?android:attr/selectableItemBackground" />
+
+                    <TextView
+                        android:id="@+id/tvGoogleUdp"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="Google: 8.8.8.8"
                         android:textSize="13sp"
                         android:textColor="@color/purple_500"
                         android:padding="8dp"

@@ -153,7 +153,17 @@ class MainActivity : AppCompatActivity() {
         val dohEnabled = settingsManager.dohEnabled
         val dohUrl = settingsManager.dohUrl
 
-        return object : DohWebViewClient(dohEnabled, dohUrl) {
+        val configuredUrl = settingsManager.url.trim()
+        var forceHttpHost = ""
+        if (configuredUrl.startsWith("http://")) {
+            try {
+                val uri = Uri.parse(configuredUrl)
+                forceHttpHost = uri.host ?: ""
+            } catch (e: Exception) {
+            }
+        }
+
+        return object : DohWebViewClient(dohEnabled, dohUrl, forceHttpHost) {
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
                 if (currentSharedText != null) {
