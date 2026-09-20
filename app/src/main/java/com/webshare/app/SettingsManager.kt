@@ -21,6 +21,10 @@ class SettingsManager(context: Context) {
         get() = prefs.getString(KEY_DOH_URL, DEFAULT_DOH_URL) ?: DEFAULT_DOH_URL
         set(value) = prefs.edit().putString(KEY_DOH_URL, value).apply()
 
+    var updateUrl: String
+        get() = prefs.getString(KEY_UPDATE_URL, DEFAULT_UPDATE_URL) ?: DEFAULT_UPDATE_URL
+        set(value) = prefs.edit().putString(KEY_UPDATE_URL, value).apply()
+
     private fun migrateSettings() {
         val version = prefs.getInt(KEY_SETTINGS_VERSION, 0)
         if (version < 2) {
@@ -40,6 +44,9 @@ class SettingsManager(context: Context) {
         private const val KEY_DOH_ENABLED = "doh_enabled"
         private const val KEY_DOH_URL = "doh_url"
         private const val KEY_SETTINGS_VERSION = "settings_version"
+        private const val KEY_UPDATE_URL = "update_url"
         const val DEFAULT_DOH_URL = "https://doh.pub/dns-query"
+        const val DEFAULT_UPDATE_URL =
+            "https://github.com/ALphaGoDai/WebShareApp/releases/latest/download/WebShareApp.apk"
     }
 }

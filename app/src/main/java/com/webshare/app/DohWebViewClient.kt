@@ -16,11 +16,14 @@ import java.net.InetSocketAddress
 import java.net.Socket
 import java.net.URL
 import java.util.concurrent.TimeUnit
+import java.util.zip.GZIPInputStream
 
 open class DohWebViewClient(
     private val dohEnabled: Boolean,
     private val dohUrl: String,
-    private val forceHttpHost: String = ""
+    private val forceHttpHost: String = "",
+    private val configuredHost: String = "",
+    private val appVersion: String = ""
 ) : WebViewClient() {
 
     private val dnsResolver: DohDnsResolver? = if (dohEnabled && dohUrl.isNotEmpty()) {
@@ -49,25 +52,61 @@ open class DohWebViewClient(
         if (scheme != "http" && scheme != "https") return null
         if (request.method != "GET") return null
 
-        // Force HTTP: WebView auto-upgrades http->https, undo that
         var urlStr = url.toString()
         val host = url.host ?: ""
+
+        // WebView (especially Huawei/HarmonyOS) auto-upgrades http to https.
+        // Undo the upgrade when the configured site is http://.
         if (scheme == "https" && forceHttpHost.isNotEmpty() && host == forceHttpHost) {
             urlStr = urlStr.replace("https://", "http://", ignoreCase = true)
         }
 
         return try {
-            if (urlStr.startsWith("https://")) {
-                fetchWithOkHttp(urlStr, request.requestHeaders)
+            if (urlStr.startsWith("https://", ignoreCase = true)) {
+                try {
+                    fetchWithOkHttp(urlStr, request.requestHeaders)
+                } catch (e: Exception) {
+                    // Self-heal: if the configured site fails over HTTPS
+                    // (misconfigured scheme, http-only server), retry as plain HTTP.
+                    if (configuredHost.isNotEmpty() && host == configuredHost) {
+                        val httpUrl = urlStr.replaceFirst("https://", "http://", ignoreCase = true)
+                        fetchWithRawSocket(httpUrl, request.requestHeaders)
+                    } else {
+                        throw e
+                    }
+                }
             } else {
                 fetchWithRawSocket(urlStr, request.requestHeaders)
             }
         } catch (e: Exception) {
-            makeErrorResponse(
-                "连接失败: ${e.message ?: "未知错误"}\n\n" +
-                    "请求地址: $urlStr\n" +
-                    "DNS模式: $dohUrl"
-            )
+            makeErrorResponse(buildErrorText(urlStr, host, e))
+        }
+    }
+
+    private fun buildErrorText(urlStr: String, host: String, e: Exception): String {
+        val sb = StringBuilder()
+        sb.append("连接失败: ").append(e.message ?: "未知错误").append("\n\n")
+        sb.append("请求地址: ").append(urlStr).append("\n")
+        sb.append("主机: ").append(host).append("\n")
+        sb.append(resolveInfo(host)).append("\n")
+        sb.append("DNS模式: ").append(if (dohUrl.isNotEmpty()) dohUrl else "系统默认").append("\n")
+        if (appVersion.isNotEmpty()) {
+            sb.append("应用版本: ").append(appVersion).append("\n")
+        }
+        sb.append("设备网络: 请在设置中运行「网络诊断」获取详细报告")
+        return sb.toString()
+    }
+
+    private fun resolveInfo(host: String): String {
+        return try {
+            if (dnsResolver != null) {
+                val ips = dnsResolver.lookup(host)
+                "DNS解析: ${ips.joinToString { it.hostAddress ?: "?" }}"
+            } else {
+                "DNS解析: 使用系统默认DNS"
+            }
+        } catch (e: Exception) {
+            "DNS解析失败: ${e.message}"
         }
     }
 
@@ -116,7 +155,6 @@ open class DohWebViewClient(
         val path = (parsed.path.ifEmpty { "/" }) +
             (parsed.query?.let { "?$it" } ?: "")
 
-        // Resolve DNS via DoH or system
         val ip = resolveHost(host)
 
         val socket = Socket()
@@ -126,7 +164,6 @@ open class DohWebViewClient(
         try {
             val out = socket.getOutputStream()
 
-            // Build HTTP request
             val sb = StringBuilder()
             sb.append("GET ").append(path).append(" HTTP/1.1\r\n")
             val hostHeader = if (port != 80) "$host:$port" else host
@@ -146,7 +183,6 @@ open class DohWebViewClient(
                     .append("Chrome/120.0.0.0 Mobile Safari/537.36\r\n")
             }
 
-            // Cookies
             val cookies = CookieManager.getInstance().getCookie(urlStr)
             if (!cookies.isNullOrEmpty()) {
                 sb.append("Cookie: ").append(cookies).append("\r\n")
@@ -158,7 +194,6 @@ open class DohWebViewClient(
             out.write(sb.toString().toByteArray(Charsets.UTF_8))
             out.flush()
 
-            // Read full response
             val input = socket.getInputStream()
             val baos = ByteArrayOutputStream()
             val buf = ByteArray(8192)
@@ -169,8 +204,10 @@ open class DohWebViewClient(
             }
 
             val responseData = baos.toByteArray()
+            if (responseData.isEmpty()) {
+                throw java.io.IOException("服务器接受连接但未返回任何数据")
+            }
 
-            // Parse response (lenient — reason phrase may be empty)
             return parseRawResponse(responseData, urlStr)
 
         } finally {
@@ -189,30 +226,37 @@ open class DohWebViewClient(
     }
 
     private fun parseRawResponse(data: ByteArray, originalUrl: String): WebResourceResponse {
-        // Find header/body boundary
-        val boundary = findHeaderEnd(data)
+        // Skip leading CR/LF junk some servers emit before the status line
+        var start = 0
+        while (start < data.size &&
+            (data[start] == 0x0d.toByte() || data[start] == 0x0a.toByte())
+        ) start++
+
+        val boundary = findHeaderEnd(data, start)
         if (boundary < 0) {
             throw java.io.IOException("Invalid HTTP response (no header end)")
         }
 
-        val headerStr = String(data, 0, boundary, Charsets.ISO_8859_1)
-        val bodyBytes = data.copyOfRange(boundary + 4, data.size)
+        val headerEndLen = if (data[boundary] == 0x0d.toByte()) 4 else 2
+        val headerStr = String(data, start, boundary - start, Charsets.ISO_8859_1)
+        val bodyBytes = data.copyOfRange(
+            minOf(boundary + headerEndLen, data.size), data.size
+        )
 
-        val lines = headerStr.split("\r\n")
-        if (lines.isEmpty()) {
+        val lines = headerStr.split("\n").map { it.trimEnd('\r') }
+        if (lines.isEmpty() || lines[0].isEmpty()) {
             throw java.io.IOException("Empty HTTP response")
         }
 
-        // Parse status line (lenient)
         val statusLine = lines[0]
         val statusCode = parseStatusCode(statusLine)
         val reasonPhrase = parseReasonPhrase(statusLine)
 
-        // Parse headers
         val responseHeaders = mutableMapOf<String, String>()
         var contentType = "text/html"
         var charset = "utf-8"
         var isChunked = false
+        var isGzip = false
 
         for (i in 1 until lines.size) {
             val line = lines[i]
@@ -235,6 +279,9 @@ open class DohWebViewClient(
                 key.equals("Transfer-Encoding", true) -> {
                     if (value.contains("chunked", true)) isChunked = true
                 }
+                key.equals("Content-Encoding", true) -> {
+                    if (value.contains("gzip", true)) isGzip = true
+                }
                 key.equals("Set-Cookie", true) -> {
                     CookieManager.getInstance().setCookie(originalUrl, value)
                 }
@@ -244,8 +291,17 @@ open class DohWebViewClient(
             }
         }
 
-        // Handle chunked encoding
-        val finalBody = if (isChunked) dechunk(bodyBytes) else bodyBytes
+        var finalBody = if (isChunked) dechunk(bodyBytes) else bodyBytes
+
+        if (isGzip && finalBody.size > 0) {
+            try {
+                finalBody = GZIPInputStream(ByteArrayInputStream(finalBody)).readBytes()
+                // Body was decoded; drop the header so WebView doesn't decode again
+                responseHeaders.keys.removeAll { it.equals("Content-Encoding", true) }
+            } catch (e: Exception) {
+                // Leave as-is; WebView may handle it
+            }
+        }
 
         return WebResourceResponse(
             contentType,
@@ -257,13 +313,20 @@ open class DohWebViewClient(
         )
     }
 
-    private fun findHeaderEnd(data: ByteArray): Int {
-        for (i in 0..data.size - 4) {
+    private fun findHeaderEnd(data: ByteArray, from: Int): Int {
+        var i = from
+        while (i <= data.size - 4) {
             if (data[i] == 0x0d.toByte() && data[i + 1] == 0x0a.toByte() &&
                 data[i + 2] == 0x0d.toByte() && data[i + 3] == 0x0a.toByte()
             ) {
                 return i
             }
+            i++
+        }
+        i = from
+        while (i <= data.size - 2) {
+            if (data[i] == 0x0a.toByte() && data[i + 1] == 0x0a.toByte()) return i
+            i++
         }
         return -1
     }
@@ -277,17 +340,17 @@ open class DohWebViewClient(
 
     private fun parseReasonPhrase(statusLine: String): String {
         val parts = statusLine.trim().split("\\s+".toRegex(), limit = 3)
-        return if (parts.size >= 3) parts[2] else "OK"
+        return if (parts.size >= 3 && parts[2].isNotEmpty()) parts[2] else "OK"
     }
 
     private fun dechunk(data: ByteArray): ByteArray {
         val baos = ByteArrayOutputStream()
         var pos = 0
         while (pos < data.size) {
-            // Find chunk size line end
             var lineEnd = pos
             while (lineEnd < data.size - 1) {
                 if (data[lineEnd] == 0x0d.toByte() && data[lineEnd + 1] == 0x0a.toByte()) break
+                if (data[lineEnd] == 0x0a.toByte()) break
                 lineEnd++
             }
             if (lineEnd >= data.size - 1) break
@@ -296,12 +359,13 @@ open class DohWebViewClient(
             val chunkSize = sizeStr.split(";")[0].trim().toIntOrNull(16) ?: break
             if (chunkSize == 0) break
 
-            val chunkStart = lineEnd + 2
+            val afterLine = if (data[lineEnd] == 0x0a.toByte()) lineEnd + 1 else lineEnd + 2
+            val chunkStart = afterLine
             val chunkEnd = chunkStart + chunkSize
             if (chunkEnd > data.size) break
 
             baos.write(data, chunkStart, chunkSize)
-            pos = chunkEnd + 2 // skip \r\n after chunk
+            pos = chunkEnd + 2
         }
         return baos.toByteArray()
     }
@@ -315,16 +379,15 @@ open class DohWebViewClient(
                 <style>
                     body { font-family: sans-serif; padding: 40px 20px; color: #333; text-align: center; }
                     h2 { color: #d32f2f; margin-bottom: 20px; }
-                    pre { text-align: left; background: #f5f5f5; padding: 16px; border-radius: 8px; font-size: 13px;
-                          overflow-x: auto; white-space: pre-wrap; word-wrap: break-word; }
+                    pre { text-align: left; background: #f5f5f5; padding: 16px; border-radius: 8px;
+                          font-size: 12px; overflow-x: auto; white-space: pre-wrap; word-wrap: break-word; }
                     .hint { margin-top: 20px; color: #666; font-size: 13px; }
                 </style>
             </head>
             <body>
                 <h2>连接失败</h2>
-                <pre>$message</pre>
-                <p class="hint">请到设置中尝试更换 DNS 服务器<br>
-                推荐: DNSPod (DoH) 或 119.29.29.29 (UDP)</p>
+                <pre>${htmlEscape(message)}</pre>
+                <p class="hint">请到设置中尝试更换 DNS 服务器，或运行「网络诊断」</p>
             </body>
             </html>
         """.trimIndent()
@@ -332,6 +395,10 @@ open class DohWebViewClient(
             "text/html", "utf-8", 502, "Bad Gateway",
             emptyMap(), ByteArrayInputStream(html.toByteArray())
         )
+    }
+
+    private fun htmlEscape(s: String): String {
+        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     }
 
     override fun shouldOverrideUrlLoading(

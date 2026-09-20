@@ -40,14 +40,25 @@ WebShareApp/
 
 ## 如何构建
 
-### 方式一：使用 Android Studio（推荐）
+### 方式一：GitHub Actions 在线构建（推荐，无需本地环境）
+
+1. 推送代码到 GitHub，Actions 自动构建
+2. 直接下载 Release APK（固定签名，可覆盖安装无需卸载）：
+
+   ```
+   https://github.com/ALphaGoDai/WebShareApp/releases/latest/download/WebShareApp.apk
+   ```
+
+   手机浏览器打开此链接即可直接下载安装。也可在 App 设置中点击"下载最新版本"。
+
+### 方式二：使用 Android Studio
 
 1. 打开 Android Studio
 2. 选择 `File > Open`，选择 `WebShareApp` 目录
 3. 等待 Gradle 同步完成（Android Studio 会自动生成 gradle-wrapper.jar）
 4. 点击 `Run` 按钮编译并安装到手机
 
-### 方式二：使用命令行
+### 方式三：使用命令行
 
 1. 安装 Android SDK（设置 `ANDROID_HOME` 环境变量）
 2. 创建 `local.properties` 文件：
@@ -57,9 +68,11 @@ WebShareApp/
 3. 运行 Gradle Wrapper（如果缺少 gradle-wrapper.jar，先安装 Gradle 8.0 并运行 `gradle wrapper`）
 4. 执行构建：
    ```
-   ./gradlew assembleDebug
+   ./gradlew assembleRelease
    ```
-5. APK 输出路径：`app/build/outputs/apk/debug/app-debug.apk`
+5. APK 输出路径：`app/build/outputs/apk/release/app-release.apk`
+
+> 注意：构建依赖仓库根目录的 `release.keystore` 签名文件（CI 首次构建会自动生成并提交）。所有构建使用同一签名，因此可以直接覆盖安装，无需卸载旧版本，应用设置也会保留。
 
 ## 使用方法
 

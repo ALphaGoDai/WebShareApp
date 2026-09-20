@@ -153,15 +153,21 @@ class MainActivity : AppCompatActivity() {
 
         val configuredUrl = settingsManager.url.trim()
         var forceHttpHost = ""
-        if (configuredUrl.startsWith("http://")) {
-            try {
-                val uri = Uri.parse(configuredUrl)
-                forceHttpHost = uri.host ?: ""
-            } catch (e: Exception) {
+        var configuredHost = ""
+        try {
+            val uri = Uri.parse(configuredUrl)
+            configuredHost = uri.host ?: ""
+            if (configuredUrl.startsWith("http://")) {
+                forceHttpHost = configuredHost
             }
+        } catch (e: Exception) {
         }
 
-        return object : DohWebViewClient(dohEnabled, dohUrl, forceHttpHost) {
+        val appVersion = try {
+            "v" + packageManager.getPackageInfo(packageName, 0).versionName
+        } catch (e: Exception) { "" }
+
+        return object : DohWebViewClient(dohEnabled, dohUrl, forceHttpHost, configuredHost, appVersion) {
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
                 if (currentSharedText != null) {

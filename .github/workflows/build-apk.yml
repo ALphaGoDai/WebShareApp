@@ -1,11 +1,12 @@
-name: Build Debug APK
+name: Build Release APK
 
 on:
   push:
     branches: [ main, master ]
-  pull_request:
-    branches: [ main, master ]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -24,15 +25,50 @@ jobs:
     - name: Setup Gradle
       uses: gradle/actions/setup-gradle@v3
 
+    - name: Ensure fixed signing keystore (first run only)
+      run: |
+        if [ ! -f release.keystore ]; then
+          keytool -genkeypair -v \
+            -keystore release.keystore \
+            -storepass webshare2026 \
+            -keypass webshare2026 \
+            -alias webshare \
+            -keyalg RSA -keysize 2048 -validity 36500 \
+            -dname "CN=WebShareApp"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add release.keystore
+          git commit -m "Add fixed signing keystore [skip ci]"
+          git push
+        fi
+
     - name: Grant execute permission for gradlew
       run: chmod +x gradlew
 
-    - name: Build Debug APK
-      run: ./gradlew assembleDebug --no-daemon
+    - name: Build Release APK
+      env:
+        BUILD_NUMBER: ${{ github.run_number }}
+      run: ./gradlew assembleRelease --no-daemon
 
-    - name: Upload APK
+    - name: Upload APK Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: WebShareApp-debug-apk
-        path: app/build/outputs/apk/debug/*.apk
+        name: WebShareApp-release-apk
+        path: app/build/outputs/apk/release/*.apk
         retention-days: 30
+
+    - name: Publish to GitHub Release (stable download URL)
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        BUILD_NUMBER: ${{ github.run_number }}
+      run: |
+        cp app/build/outputs/apk/release/app-release.apk WebShareApp.apk
+        gh release delete latest --yes --cleanup-tag 2>/dev/null || true
+        gh release create latest WebShareApp.apk \
+          --title "WebShareApp v1.0.$BUILD_NUMBER" \
+          --notes "自动构建 v1.0.$BUILD_NUMBER
+
+        直接下载 WebShareApp.apk 安装即可覆盖升级，无需卸载旧版本。
+
+        永久下载地址（手机浏览器可直接打开）：
+        https://github.com/ALphaGoDai/WebShareApp/releases/latest/download/WebShareApp.apk"
