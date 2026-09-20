@@ -9,3 +9,8 @@
 .cxx
 local.properties
 /app/build
+
+dbg*.png
+screen*.png
+WebShareApp-latest.apk
+testserver.ps1
