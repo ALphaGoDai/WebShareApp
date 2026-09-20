@@ -45,14 +45,18 @@ class SettingsActivity : AppCompatActivity() {
         btnSave = findViewById(R.id.btnSave)
         tvVersion = findViewById(R.id.tvVersion)
 
+        findViewById<android.widget.ImageButton>(R.id.btnBack).setOnClickListener {
+            finish()
+        }
+
         etUrl.setText(settingsManager.url)
         switchDoh.isChecked = settingsManager.dohEnabled
         etDohUrl.setText(settingsManager.dohUrl)
         etUpdateUrl.setText(settingsManager.updateUrl)
         updateDohUrlVisibility()
 
-        tvVersion.text = "当前版本: " + try {
-            "v" + packageManager.getPackageInfo(packageName, 0).versionName
+        tvVersion.text = "v" + try {
+            packageManager.getPackageInfo(packageName, 0).versionName
         } catch (e: Exception) { "-" }
 
         switchDoh.setOnCheckedChangeListener { _, isChecked ->
