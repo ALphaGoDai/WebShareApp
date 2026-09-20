@@ -39,10 +39,6 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) { "" }
     }
 
-    private fun injectShim(view: WebView?) {
-        if (shimJs.isNotEmpty()) view?.evaluateJavascript(shimJs, null)
-    }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
@@ -179,15 +175,9 @@ class MainActivity : AppCompatActivity() {
             "v" + packageManager.getPackageInfo(packageName, 0).versionName
         } catch (e: Exception) { "" }
 
-        return object : DohWebViewClient(dohEnabled, dohUrl, forceHttpHost, configuredHost, appVersion) {
-            override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-                super.onPageStarted(view, url, favicon)
-                injectShim(view)
-            }
-
+        return object : DohWebViewClient(dohEnabled, dohUrl, forceHttpHost, configuredHost, appVersion, shimJs) {
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
-                injectShim(view)
                 if (currentSharedText != null) {
                     val js = buildString {
                         append("if(typeof window.onSharedContent==='function'){")

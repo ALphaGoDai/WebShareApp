@@ -28,7 +28,8 @@ open class DohWebViewClient(
     private val dohUrl: String,
     private val forceHttpHost: String = "",
     private val configuredHost: String = "",
-    private val appVersion: String = ""
+    private val appVersion: String = "",
+    private val shimJs: String = ""
 ) : WebViewClient() {
 
     private val dnsResolver: DohDnsResolver? = if (dohEnabled && dohUrl.isNotEmpty()) {
@@ -70,7 +71,7 @@ open class DohWebViewClient(
         }
 
         return try {
-            smartFetch(urlStr, host, request.requestHeaders)
+            smartFetch(urlStr, host, request.requestHeaders, request.isForMainFrame)
         } catch (e: Exception) {
             makeErrorResponse(buildErrorText(urlStr, host, e))
         }
@@ -82,22 +83,26 @@ open class DohWebViewClient(
     private fun smartFetch(
         urlStr: String,
         host: String,
-        headers: Map<String, String>
+        headers: Map<String, String>,
+        isMainFrame: Boolean
     ): WebResourceResponse {
         if (urlStr.startsWith("https://", ignoreCase = true)) {
             try {
-                return fetchWithOkHttp(urlStr, headers)
+                return maybeInjectShim(fetchWithOkHttp(urlStr, headers), isMainFrame)
             } catch (e: Exception) {
                 // OkHttp is strict about response parsing; retry over a raw
                 // TLS socket with the lenient parser.
                 try {
-                    return fetchWithTlsRawSocket(urlStr, headers)
+                    return maybeInjectShim(fetchWithTlsRawSocket(urlStr, headers), isMainFrame)
                 } catch (e2: Exception) {
                     // Site may actually be plain http (misconfigured scheme)
                     if (configuredHost.isNotEmpty() && host == configuredHost) {
-                        return fetchWithRawSocket(
-                            urlStr.replaceFirst("https://", "http://", ignoreCase = true),
-                            headers
+                        return maybeInjectShim(
+                            fetchWithRawSocket(
+                                urlStr.replaceFirst("https://", "http://", ignoreCase = true),
+                                headers
+                            ),
+                            isMainFrame
                         )
                     }
                     throw e2
@@ -107,14 +112,68 @@ open class DohWebViewClient(
 
         // Cleartext URL
         if (tlsOnlyHosts[host] == true) {
-            return fetchWithTlsRawSocket(toHttps(urlStr), headers)
+            return maybeInjectShim(fetchWithTlsRawSocket(toHttps(urlStr), headers), isMainFrame)
         }
         return try {
-            fetchWithRawSocket(urlStr, headers)
+            maybeInjectShim(fetchWithRawSocket(urlStr, headers), isMainFrame)
         } catch (e: Exception) {
             // Some servers only accept TLS even on non-standard ports
-            val resp = fetchWithTlsRawSocket(toHttps(urlStr), headers)
+            val resp = maybeInjectShim(fetchWithTlsRawSocket(toHttps(urlStr), headers), isMainFrame)
             tlsOnlyHosts[host] = true
+            resp
+        }
+    }
+
+    /**
+     * Embed the fetch/XHR bridge shim into the main HTML document, ahead of
+     * any page script. evaluateJavascript in onPageStarted/Finished runs after
+     * page scripts, which is too late to intercept their network calls.
+     */
+    private fun maybeInjectShim(
+        resp: WebResourceResponse,
+        isMainFrame: Boolean
+    ): WebResourceResponse {
+        if (!isMainFrame || shimJs.isEmpty()) return resp
+        val mime = resp.mimeType ?: return resp
+        if (!mime.contains("html", ignoreCase = true)) return resp
+        return try {
+            val charsetName = resp.encoding?.takeIf { it.isNotEmpty() } ?: "utf-8"
+            val data = resp.data?.readBytes() ?: return resp
+            val html = String(data, charset(charsetName))
+
+            val tag = "<script>$shimJs</script>"
+            var injected: String = tag + html
+            val headIdx = html.indexOf("<head>", ignoreCase = true)
+            if (headIdx >= 0) {
+                val at = headIdx + "<head>".length
+                injected = html.substring(0, at) + tag + html.substring(at)
+            } else {
+                val headTag = Regex("<head[^>]*>", RegexOption.IGNORE_CASE).find(html)
+                if (headTag != null) {
+                    val at = headTag.range.last + 1
+                    injected = html.substring(0, at) + tag + html.substring(at)
+                } else {
+                    val htmlTag = Regex("<html[^>]*>", RegexOption.IGNORE_CASE).find(html)
+                    if (htmlTag != null) {
+                        val at = htmlTag.range.last + 1
+                        injected = html.substring(0, at) + tag + html.substring(at)
+                    }
+                }
+            }
+
+            val headers = mutableMapOf<String, String>()
+            resp.responseHeaders?.forEach { (k, v) ->
+                if (!k.equals("Content-Length", true)) headers[k] = v
+            }
+            WebResourceResponse(
+                resp.mimeType,
+                charsetName,
+                resp.statusCode,
+                resp.reasonPhrase,
+                headers,
+                ByteArrayInputStream(injected.toByteArray(charset(charsetName)))
+            )
+        } catch (e: Exception) {
             resp
         }
     }
@@ -164,24 +223,28 @@ open class DohWebViewClient(
             )
         }
 
-        val response = httpsClient.newCall(builder.build()).execute()
-        val ct = response.header("Content-Type") ?: "text/html"
-        val parts = ct.split(";")
-        val mime = parts[0].trim()
-        val cs = if (parts.size > 1) parts[1].trim().removePrefix("charset=").trim() else "utf-8"
+        httpsClient.newCall(builder.build()).execute().use { response ->
+            val ct = response.header("Content-Type") ?: "text/html"
+            val parts = ct.split(";")
+            val mime = parts[0].trim()
+            val cs = if (parts.size > 1) parts[1].trim().removePrefix("charset=").trim() else "utf-8"
 
-        val respHeaders = mutableMapOf<String, String>()
-        for ((k, v) in response.headers) {
-            if (!k.equals("Set-Cookie", true)) respHeaders[k] = v
+            val respHeaders = mutableMapOf<String, String>()
+            for ((k, v) in response.headers) {
+                if (!k.equals("Set-Cookie", true)) respHeaders[k] = v
+            }
+
+            val body = response.body?.bytes()
+                ?: throw java.io.IOException("Empty response body")
+
+            // Android's WebResourceResponse rejects empty reason phrases, but the
+            // site's status line may omit it (e.g. "HTTP/1.1 200").
+            val reason = response.message.ifEmpty { "OK" }
+            return WebResourceResponse(
+                mime, cs, response.code, reason, respHeaders,
+                ByteArrayInputStream(body)
+            )
         }
-
-        val body = response.body?.byteStream()
-            ?: throw java.io.IOException("Empty response body")
-
-        // Android's WebResourceResponse rejects empty reason phrases, but the
-        // site's status line may omit it (e.g. "HTTP/1.1 200").
-        val reason = response.message.ifEmpty { "OK" }
-        return WebResourceResponse(mime, cs, response.code, reason, respHeaders, body)
     }
 
     private fun fetchWithRawSocket(
