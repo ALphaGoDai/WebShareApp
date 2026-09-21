@@ -5,7 +5,7 @@
 ## 功能特性
 
 - **WebView 网页挂载**：在应用内加载指定网页
-- **接收分享内容**：接收来自其他应用分享的文本（网址）和图片
+- **接收分享内容**：接收来自其他应用分享的文本（网址）、图片和**视频 / 音频**；分享进来的相册文件在页面里点上传时直接使用，不用再翻一遍相册
 - **设置界面**：可配置打开的网页地址
 - **下载到手机**：网页里的下载按钮 → 确认框选目录 → 走 App 自己的 DNS/TLS 通道下载，带进度通知
 - **剪贴板可用**：`http://` 源下网页的「复制 / 粘贴」按钮也能正常工作（桥接 App 剪贴板）
@@ -262,6 +262,22 @@ App 的三种处理：
 「已修复录像尾部损坏帧（丢弃 N 个损坏音频帧）」。超过 32 MB 的文件不修（采样表要整包进内存，
 太大就跳过，交给服务端转码兜底）；超过 64 MB 的视频仍按原来的 Range 方式交付。
 
+### 方式 K：把手机里的文件分享给站点（v1.0.20 起）
+
+相册 / 文件管理器里选「分享」时，系统分享面板里会出现本应用（`ACTION_SEND` 与
+`SEND_MULTIPLE`，类型覆盖 `image/*`、`video/*`、`audio/*`，和站点 `<input accept>` 一致）。
+分享一个视频进来之后：
+
+1. App 记下文件的 `content://` 地址、登记成「刚选过的文件」，带在网址后面打开站点
+   （`?shared=...`，走的就是第 2 步配的那套分享内容传递）；
+2. 站点认出这是本机文件（网页读不到 `content://` 的内容），显示「本机文件」提示和上传入口；
+3. 用户在页面里点上传 → 打开文件选择器的那一刻，App 直接把分享的文件回填给输入框
+   （不再弹相册选择器；页面这次要的类型和分享的文件对不上时才回退到普通选择器），
+   接着走方式 H 的 multipart 通道上传。
+
+文件全程流式读取：不复制、不改名、不进内存。读相册文件要权限——Android 13+ 是「照片和视频」
+（`READ_MEDIA_IMAGES/VIDEO/AUDIO`），更早版本是存储权限，第一次分享时申请一次。
+
 ### 3. 配置安全 DNS (DoH)
 
 1. 在设置页面打开"使用安全 DNS"开关
@@ -349,6 +365,16 @@ App 的三种处理：
 
 **下载路径**（`DownloadService.kt`）——下完后读回文件跑同一套 `MediaRepair`，修好了就覆盖写回，
 识别不了 / 不需要修（返回 null）就保持原样，绝不动健康文件。
+
+**分享进来的文件**（`MainActivity.kt`）——`ACTION_SEND` / `SEND_MULTIPLE` 的 `EXTRA_STREAM`
+取 `content://`：先登记进 `WebAppInterface` 的「刚选过的文件」表（multipart 上传按 文件名+大小
+找内容），再在页面开文件选择器时**直接回填**（`onShowFileChooser`，类型不匹配才回退到选择器）。
+`EXTRA_STREAM` 既可能是单个 `Uri` 也可能是 `List`，直接从 extras 里按类型取，不走
+`getParcelableExtra`（后者在类型不符时可能抛 `ClassCastException`）。读相册文件要
+`READ_MEDIA_VIDEO` / `READ_MEDIA_AUDIO`（13+）或 `READ_EXTERNAL_STORAGE`（≤12）——只声明
+`READ_MEDIA_IMAGES` 时 MediaProvider 会对视频 uri 抛
+`SecurityException: com.webshare.app has no access to content://media/...`，清单里补齐、
+首次分享时申请一次。
 
 ### 最低系统要求
 

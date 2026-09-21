@@ -37,6 +37,9 @@ class MainActivity : AppCompatActivity() {
     private var currentSharedText: String? = null
     private var currentSharedType: String = "none"
 
+    /** 分享进来的本机文件：页面里的上传入口一开选择器就直接交给它，不再让用户去相册里翻 */
+    private var pendingShareUris: List<Uri> = emptyList()
+
     private var settingsLauncher: ActivityResultLauncher<Intent>? = null
 
     /** 网页里 <input type="file"> 触发的选择回调，选中后必须回填 */
@@ -100,6 +103,18 @@ class MainActivity : AppCompatActivity() {
     private val notificationPermissionLauncher: ActivityResultLauncher<String> =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
+    /** 分享进来的相册文件要读得到才有得上传：13+ 按类型要 READ_MEDIA_*，更早要 READ_EXTERNAL_STORAGE */
+    private val mediaPermissionLauncher: ActivityResultLauncher<Array<String>> =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
+            if (result.values.any { granted -> granted == false }) {
+                Toast.makeText(
+                    this@MainActivity,
+                    "没有读取相册的权限，站点拿不到分享的文件",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        }
+
     private val shimJs: String by lazy {
         try {
             assets.open("shim.js").bufferedReader().use { it.readText() }
@@ -140,25 +155,77 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun handleIntent(intent: Intent?) {
-        if (intent?.action == Intent.ACTION_SEND) {
-            val type = intent.type
-            if (type == "text/plain") {
-                val sharedText = intent.getStringExtra(Intent.EXTRA_TEXT) ?: ""
-                currentSharedText = sharedText
+        val action = intent?.action
+        if (action == Intent.ACTION_SEND || action == Intent.ACTION_SEND_MULTIPLE) {
+            val type = intent.type ?: ""
+            if (type.startsWith("text/")) {
+                currentSharedText = intent.getStringExtra(Intent.EXTRA_TEXT) ?: ""
                 currentSharedType = "text"
-            } else if (type?.startsWith("image/") == true) {
-                @Suppress("DEPRECATION")
-                val imageUri = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
-                if (imageUri != null) {
-                    currentSharedText = imageUri.toString()
-                    currentSharedType = "image"
+                pendingShareUris = emptyList()
+            } else {
+                val uris = sharedStreams(intent)
+                if (uris.isNotEmpty()) {
+                    // 登记一份：页面里的 <input type="file"> 打开时直接回填，multipart 上传也靠这份登记找回内容
+                    pendingShareUris = uris
+                    currentSharedText = uris.first().toString()
+                    currentSharedType = type.substringBefore('/').ifEmpty { "file" }
+                    ensureMediaReadPermission(type)
+                    webAppInterface.registerPickedFiles(uris)
+                } else {
+                    currentSharedText = null
+                    currentSharedType = "none"
+                    pendingShareUris = emptyList()
                 }
             }
         } else {
             currentSharedText = null
             currentSharedType = "none"
+            pendingShareUris = emptyList()
         }
         loadUrl()
+    }
+
+    /** ACTION_SEND（单个）与 ACTION_SEND_MULTIPLE（相册多选）都从 EXTRA_STREAM 取 uri */
+    private fun sharedStreams(intent: Intent): List<Uri> {
+        return when (val raw = intent.extras?.get(Intent.EXTRA_STREAM)) {
+            is Uri -> listOf(raw)
+            is List<*> -> raw.filterIsInstance<Uri>()
+            else -> emptyList()
+        }
+    }
+
+    /** 分享进来的文件要读得到才上传得了：Android 13+ 按类型要 READ_MEDIA_*，更早版本是 READ_EXTERNAL_STORAGE */
+    private fun ensureMediaReadPermission(mimeType: String) {
+        val wanted = mutableListOf<String>()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (mimeType.startsWith("image/")) wanted.add(Manifest.permission.READ_MEDIA_IMAGES)
+            if (mimeType.startsWith("video/")) wanted.add(Manifest.permission.READ_MEDIA_VIDEO)
+            if (mimeType.startsWith("audio/")) wanted.add(Manifest.permission.READ_MEDIA_AUDIO)
+        } else {
+            wanted.add(Manifest.permission.READ_EXTERNAL_STORAGE)
+        }
+        val missing = wanted.filter {
+            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        }
+        if (missing.isNotEmpty()) mediaPermissionLauncher.launch(missing.toTypedArray())
+    }
+
+    /** 页面这次要的类型和分享进来的文件对得上吗？对不上就走普通选择器，免得往输入框里塞错东西 */    private fun shareMatchesAccept(uris: List<Uri>, params: WebChromeClient.FileChooserParams?): Boolean {
+        val accepts = params?.acceptTypes?.map { it.trim().lowercase() }?.filter { it.isNotEmpty() }
+        if (accepts.isNullOrEmpty() || accepts.contains("*/*")) return true
+
+        val sharedTypes = uris.mapNotNull { contentResolver.getType(it)?.lowercase() }
+        if (sharedTypes.isEmpty()) return true      // 问不出类型（file:// 之类）就别拦着
+
+        for (accept in accepts) {
+            if (accept.startsWith(".")) continue    // 只认扩展名的限定理解不了，交给通配分支
+            val family = accept.substringBefore('/')
+            for (shared in sharedTypes) {
+                if (shared == accept) return true
+                if (accept.endsWith("/*") && shared.substringBefore('/') == family) return true
+            }
+        }
+        return false
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -229,6 +296,22 @@ class MainActivity : AppCompatActivity() {
                 fileChooserParams: FileChooserParams?
             ): Boolean {
                 fileChooserCallback?.onReceiveValue(null)
+
+                // 刚分享进来的文件：页面一开选择器就直接回填，用户不用再到相册里翻一遍
+                val shared = pendingShareUris
+                if (shared.isNotEmpty() && shareMatchesAccept(shared, fileChooserParams)) {
+                    pendingShareUris = emptyList()
+                    fileChooserCallback = null
+                    webAppInterface.registerPickedFiles(shared)
+                    filePathCallback?.onReceiveValue(shared.toTypedArray())
+                    Toast.makeText(
+                        this@MainActivity,
+                        if (shared.size == 1) "已使用分享的文件" else "已使用分享的 ${shared.size} 个文件",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                    return true
+                }
+
                 fileChooserCallback = filePathCallback
 
                 val mimeTypes = fileChooserParams?.acceptTypes
