@@ -466,6 +466,47 @@
     };
   })();
 
+  // ---------- 解码能力：纠正 WebView 对 H.265 的谎报 ----------
+  // Android WebView 的 canPlayType("video/mp4; codecs=hvc1...") 在不少机型/ROM 上
+  // 一律返回 "probably"，但真解码时抛 MEDIA_ERR_DECODE，页面于是拿到一个本机播不了的
+  // H.265 码流（微博/B站/资源站都按 canPlayType 选码流、或决定要不要服务端转码）。
+  // 只在本机确实没有 H.265 解码器时把回答改成空串，其余一律沿用原生回答——
+  // VP9/AV1 即使没硬解也有 Chromium 内置软解，不能按"系统没解码器"否决。
+  (function fixCanPlayType() {
+    var caps = null;
+    try { if (bridge.mediaCaps) caps = JSON.parse(bridge.mediaCaps()); } catch (e) {}
+    if (!caps || typeof caps.hevc !== 'boolean') return;
+    window.__wsMediaCaps = caps;
+
+    function claimsHevc(type) {
+      var s = String(type || '').toLowerCase();
+      return s.indexOf('hvc1') >= 0 || s.indexOf('hev1') >= 0 ||
+             s.indexOf('hevc') >= 0 || s.indexOf('h265') >= 0 ||
+             s.indexOf('h.265') >= 0;
+    }
+    function deny(type) {
+      return caps.hevc === false && claimsHevc(type);
+    }
+
+    var proto = window.HTMLMediaElement && HTMLMediaElement.prototype;
+    if (proto && typeof proto.canPlayType === 'function') {
+      var origCPT = proto.canPlayType;
+      proto.canPlayType = function(type) {
+        if (deny(type)) return '';
+        return origCPT.apply(this, arguments);
+      };
+    }
+    // MSE 播放器（B站 DASH 等）用 MediaSource.isTypeSupported 判能力
+    var MS = window.MediaSource;
+    if (MS && typeof MS.isTypeSupported === 'function') {
+      var origITS = MS.isTypeSupported;
+      MS.isTypeSupported = function(type) {
+        if (deny(type)) return false;
+        return origITS.apply(this, arguments);
+      };
+    }
+  })();
+
   // ---------- 新窗口 / target=_blank ----------
   // 网页里的「浏览器打开」按钮走 window.open, WebView 不实现多窗口时点了没反应。
   // 统一交给系统浏览器打开，应用窗口保持停留在当前页面。

@@ -140,10 +140,16 @@ class WebAppInterface(private val context: Context) {
         enqueueTask(callback) { executeMultipart(url, partsJson) }
     }
 
+    /**
+     * 本机解码能力（JSON）。WebView 的 canPlayType 在部分 ROM 上会谎报支持 H.265，
+     * 网页据此选码流/决定要不要服务端转码时会被带偏，注入脚本会用这里的真实能力纠正。
+     */
+    @JavascriptInterface
+    fun mediaCaps(): String = MediaCaps.json()
+
     /** 读剪贴板文本（非安全上下文里网页拿不到 navigator.clipboard，只能走桥接） */
     @JavascriptInterface
-    fun readClipboard(): String {
-        return try {
+    fun readClipboard(): String {        return try {
             val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
             val clip = cm.primaryClip ?: return ""
             if (clip.itemCount <= 0) return ""

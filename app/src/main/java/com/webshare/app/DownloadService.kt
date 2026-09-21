@@ -15,6 +15,7 @@ import android.os.IBinder
 import android.provider.DocumentsContract
 import android.provider.MediaStore
 import android.provider.OpenableColumns
+import android.util.Log
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
@@ -63,10 +64,12 @@ class DownloadService : Service() {
             var ok = false
             var error: String? = null
             var savedUri: Uri? = null
+            var repairNote = ""
             try {
                 savedUri = download(url, name, mime, treeUri, referer) { done, total ->
                     notifyProgress(name, done, total)
                 }
+                repairNote = tryRepairDownloaded(url, mime, savedUri)
                 ok = true
             } catch (e: Exception) {
                 error = e.message ?: "未知错误"
@@ -74,7 +77,7 @@ class DownloadService : Service() {
 
             val remaining = active.decrementAndGet()
             if (ok && savedUri != null) {
-                notifyDone(name, savedUri, mime)
+                notifyDone(name, savedUri, mime, repairNote)
             } else {
                 notifyFailed(name, error ?: "下载失败")
             }
@@ -153,14 +156,40 @@ class DownloadService : Service() {
         return target.uri
     }
 
+    /**
+     * 下载完成后，若是录像类文件且时间轴有病（坏帧），就地替换成修复后的内容——
+     * 与浏览器里播放的、以及保存对话框显示的大小保持一致，落盘的文件在任何播放器里都能放。
+     * 修复不了（正常文件/非视频/超大文件）时原样保留。
+     */
+    private fun tryRepairDownloaded(url: String, mime: String, uri: Uri): String {
+        val looksVideo = mime.startsWith("video/") || mime.isEmpty() ||
+            mime.contains("octet-stream")
+        if (!looksVideo) return ""
+        val resolver = contentResolver
+        return try {
+            val bytes = resolver.openInputStream(uri)?.use { it.readBytes() } ?: return ""
+            if (bytes.size < 4096 || bytes.size > MediaRepair.MAX_REPAIR_BYTES) return ""
+            val fixed = MediaRepair.repairBytes(bytes, url, cacheDir) ?: return ""
+            // 字节已在内存里，落到目标（wt = 截断后写入）
+            resolver.openOutputStream(uri, "wt")?.use {
+                it.write(fixed.bytes)
+                it.flush()
+            } ?: return ""
+            Log.i(TAG, "downloaded file repaired: ${bytes.size} -> ${fixed.bytes.size} bytes")
+            fixed.note
+        } catch (e: Exception) {
+            Log.w(TAG, "repair downloaded file failed: ${e.message}")
+            ""
+        }
+    }
+
     private fun streamTo(
         input: InputStream,
         output: OutputStream,
         total: Long,
         name: String,
         onProgress: (Long, Long) -> Unit
-    ) {
-        val buf = ByteArray(64 * 1024)
+    ) {        val buf = ByteArray(64 * 1024)
         var done = 0L
         var lastNotify = 0L
         while (true) {
@@ -337,7 +366,7 @@ class DownloadService : Service() {
         return "$name · $size"
     }
 
-    private fun notifyDone(name: String, uri: Uri, mime: String) {
+    private fun notifyDone(name: String, uri: Uri, mime: String, repairNote: String = "") {
         val openIntent = Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(uri, mime)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -349,7 +378,7 @@ class DownloadService : Service() {
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_sys_download_done)
             .setContentTitle("下载完成")
-            .setContentText(name)
+            .setContentText(if (repairNote.isEmpty()) name else "$name · $repairNote")
             .setAutoCancel(true)
             .setContentIntent(pi)
             .addAction(android.R.drawable.ic_menu_view, "打开", pi)
@@ -358,7 +387,7 @@ class DownloadService : Service() {
         try {
             NotificationManagerCompat.from(this).notify(notificationSeq.incrementAndGet(), notification)
         } catch (_: Exception) {}
-        toastOnMain("已保存：$name")
+        toastOnMain(if (repairNote.isEmpty()) "已保存：$name" else "已保存：$name（$repairNote）")
     }
 
     private fun notifyFailed(name: String, error: String) {
@@ -426,5 +455,7 @@ class DownloadService : Service() {
             if (mb < 1024) return String.format(Locale.US, "%.1f MB", mb)
             return String.format(Locale.US, "%.2f GB", mb / 1024.0)
         }
+
+        private const val TAG = "WebShareApp"
     }
 }

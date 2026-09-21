@@ -11,6 +11,7 @@
 - **剪贴板可用**：`http://` 源下网页的「复制 / 粘贴」按钮也能正常工作（桥接 App 剪贴板）
 - **文件上传**：网页 `<input type="file">` 可用，带文件的表单由 App 流式组装上传
 - **新窗口链接交给系统浏览器**：`window.open` / `target="_blank"` 不再顶掉挂载的页面
+- **网页视频能播就读得动**：把设备真实的解码能力（有没有 H.265 硬解）如实告诉网页，并把时间轴损坏的录像在播放前自动修好
 - **安全 DNS (DoH)**：支持 DNS-over-HTTPS，可自定义 DoH 服务器，防止 DNS 劫持
 - **JavaScript 接口**：网页可通过 JavaScript 获取分享内容、剪贴板、网络桥接
 
@@ -33,6 +34,8 @@ WebShareApp/
 │       │   ├── DownloadService.kt        # 下载前台服务（MediaStore / SAF 目录 + 进度通知）
 │       │   ├── DownloadUi.kt             # 下载文件名解析 + 保存目录确认框
 │       │   ├── SaveLocationStore.kt      # 记住用户选过的保存目录
+│       │   ├── MediaCaps.kt              # 真实解码能力探测（MediaCodecList，供网页查询）
+│       │   ├── MediaRepair.kt            # 录像时间轴修复（丢坏帧 + MediaMuxer 重封装 + 结果缓存）
 │       │   └── WebAppInterface.kt        # JavaScript 接口（含剪贴板 / 上传 / 外部浏览器）
 │       └── res/
 │           ├── layout/                   # 布局文件
@@ -169,6 +172,14 @@ Android.httpPostForm(
 Android.copyText("要复制的文本");           // 返回是否成功
 Android.readClipboard();                    // 返回剪贴板文本（需 App 在前台）
 Android.openExternal("https://example.com"); // 用系统浏览器打开
+
+// 真实解码能力（注入脚本已用来自动修正 canPlayType / MediaSource.isTypeSupported，
+// 网页若想自己判断可以读这个）
+JSON.parse(Android.mediaCaps());
+// → { "hevc": true, "hwHevc": false, "sdk": 35 }
+//   hevc    : 这台设备能不能解 H.265（软解也算）
+//   hwHevc  : 是否是硬件解码
+//   sdk     : Build.VERSION.SDK_INT
 ```
 
 > 说明：桥接请求全部走 `shouldInterceptRequest` 同一套 DNS/TLS 逻辑（DoH 优先、明文被拒自动切 TLS），因此和主页面加载行为一致。回调在主线程执行，可安全操作 DOM。
@@ -219,6 +230,35 @@ v1.0.24 起注入脚本会把 `navigator.clipboard`（`writeText` / `readText`�
 `window.open()` 与 `target="_blank"` 的链接（例如页面里的「浏览器打开」「打开原页面」）
 由系统浏览器打开，App 窗口停留在当前页，不会把挂载的网页顶掉。
 
+### 方式 J：网页视频能播就读得动（v1.0.18 起）
+
+站点里播放监控 / 门锁录像（「有人经过」「按门铃」这类标签）时，安卓 WebView 常报
+`MEDIA_ERR_DECODE`，页面上就是「加载失败，正在重试…」然后「解码失败」。这不是网页的锅，
+而是这类录像本身有两个毛病：
+
+1. **MP4 时间轴塌陷**：录到末尾时一批帧的时间戳被压成 62～125 微秒（正常应该是 30 毫秒级），
+   而这批帧的数据同时是错位的（HEVC NAL 单元没对齐、AAC 帧解不出来）。安卓的音频解码器
+   碰到第一个这种包就直接躺平，`<video>` 于是报解码错误。
+2. **能力上报不实**：网页用 `canPlayType('video/mp4; codecs="hev1"')` 判断能不能播 H.265，
+   回答来自 WebView 的 Chrome 内核而不是设备本身——有的 ROM / 旧 WebView 会对 H.265 一律
+   乐观作答，网页于是挑了一个本机其实解不了的码流，播到一半就是「解码失败」；
+   B 站这类走 MSE 的播放器看的是 `MediaSource.isTypeSupported`，同样的问题。
+
+App 的两种处理：
+
+- **如实上报能力**：注入脚本启动时调 `Android.mediaCaps()`（读 `MediaCodecList`），
+  设备有 H.265 解码器时继续沿用内核的判断（VP9 / AV1 有内核软解，绝不能降级），
+  只有设备确实没有 H.265 解码器、内核却声称能播时，才把 `canPlayType` /
+  `isTypeSupported` 里 hevc/h265 的答案改成「不支持」——让网页老老实实走服务端转码。
+- **播放前修好录像**：拦截到视频响应时（`video/*` 或 .mp4/.mov/.mkv 等后缀）先扫一遍时间轴，
+  发现塌陷就把那批坏帧丢掉、用 `MediaMuxer` 重新封装（不重编码，画质无损），修好的结果按 URL
+  缓存在应用缓存目录，同一个视频只修一次。修好的那段替换掉原响应体后，页面 / 播放器拿到的是
+  一个时间轴连续、能正常解到结尾的文件。健康视频一帧不动，只多一次扫描。
+
+「下载到手机」走的是同一套修复：存到本地 / NAS 上的也是修好的文件，通知栏会写明
+「已修复录像时间轴（丢弃 N 个损坏音频帧）」。超过 32 MB 的文件不修（扫描要整包进内存，
+太大就跳过，交给服务端转码兜底）。
+
 ### 3. 配置安全 DNS (DoH)
 
 1. 在设置页面打开"使用安全 DNS"开关
@@ -256,6 +296,33 @@ v1.0.24 起注入脚本会把 `navigator.clipboard`（`writeText` / `readText`�
   应用切到后台或息屏也能继续
 - 已开启 `setWebContentsDebuggingEnabled`，可用 `adb forward tcp:9222 localabstract:webview_devtools_remote_<pid>`
   连 Chrome DevTools 调试页面
+
+### 网页视频：能力上报与录像修复
+
+**能力上报**（`MediaCaps.kt` + `shim.js`）——`MediaCodecList(ALL_CODECS)` 里跳过 encoder，
+按 `isHardwareAccelerated`（Android 10+）/ 解码器名字（更早版本）判断 H.265 是硬解还是软解，
+结果给注入脚本；脚本只在「设备完全没有 H.265 解码器」时才把 `canPlayType` /
+`MediaSource.isTypeSupported` 的 hevc/h265 答案改成空串 / false。VP9（libvpx）和 AV1（dav1d）
+是 Chrome 自带软解，不能跟着一起降级，否则本来能播的 B 站 AV1 视频反而播不了。
+
+**时间轴修复**（`MediaRepair.kt`）——用 `MediaExtractor`（`MediaDataSource` 包住内存里的字节）
+把每个 track 的样本时间戳全读出来，判定规则：相邻样本时间差 `0 ≤ Δ < 1000µs` 且这种样本 ≥ 3 个
+才算「塌陷」，把塌陷样本丢掉，连同它们前面那一帧（塌陷起点那一帧的数据通常也坏了）。
+判定阈值不能放宽：B 帧会导致 PTS 逆序（差值为负），把负差也算成损坏会误伤 B 帧视频——
+早期一条 `Δ < max(2000, 自然间隔/4)` 的规则就曾把 321 个健康视频里的 296 个砍成残废，
+现在这条规则在全站 349 个视频上跑，命中的 24 个全部是门锁录像、零误伤。
+判定后走 `MediaMuxer` 重新封装（`MediaCodec` 不参与，画质无损），封装完再用 `MediaExtractor`
+打开验证一次（能打开、有视频 track）才写进缓存，缓存目录按规则版本号分目录
+（`video-repair-r2`），换规则自然失效。修复结果按 URL 的 MD5 缓存，同一视频只修一次。
+
+**踩过的坑：Range / 206**——`shouldInterceptRequest` 里重写了响应体，就必须同时把
+`Content-Range` / `Content-Length` 删掉并把状态码改回 200。播放器发的是带 `Range` 的请求，
+站点回 206 且 Content-Range 描述的是**原始**长度；如果只换 body 不动头，WebView 的
+FFmpegDemuxer 会按错误的长度读，报 `PIPELINE_ERROR_READ: FFmpegDemuxer: data source error`
+（`MEDIA_ERR_SRC_NOT_SUPPORTED`，看起来像格式不支持，其实只是长度对不上）。
+
+**下载路径**（`DownloadService.kt`）——下完后读回文件跑同一套 `MediaRepair`，修好了就覆盖写回，
+识别不了 / 不需要修（返回 null）就保持原样，绝不动健康文件。
 
 ### 最低系统要求
 

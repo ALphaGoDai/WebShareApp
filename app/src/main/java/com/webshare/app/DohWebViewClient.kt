@@ -30,7 +30,11 @@ open class DohWebViewClient(
     private val forceHttpHost: String = "",
     private val configuredHost: String = "",
     private val appVersion: String = "",
-    private val shimJs: String = ""
+    private val shimJs: String = "",
+    /** 录像时间轴修复用的缓存目录（App cacheDir） */
+    private val cacheDir: java.io.File? = null,
+    /** 向用户提示修复结果（在拦截线程回调，调用方自己切主线程） */
+    private val onNotice: ((String) -> Unit)? = null
 ) : WebViewClient() {
 
     private val dnsResolver: DohDnsResolver? = if (dohEnabled && dohUrl.isNotEmpty()) {
@@ -89,6 +93,36 @@ open class DohWebViewClient(
 
     private fun toHttps(u: String) =
         u.replaceFirst("http://", "https://", ignoreCase = true)
+
+    /**
+     * 录像类文件（门锁/监控）常见"时间轴塌陷"故障：尾部一批采样点的 PTS 挤在几十微秒内，
+     * 且这批帧数据本身残缺，Android 解码器会直接报错、WebView 的 <video> 抛 code 3。
+     * 这里在把字节交给 WebView 之前先过一遍 MediaRepair：需要修就把坏帧丢掉重新封装，
+     * 不需要修（绝大多数文件）原样返回，不做任何额外复制。
+     */
+    private fun maybeRepairVideo(bytes: ByteArray, urlStr: String, mime: String?): ByteArray {
+        val dir = cacheDir ?: return bytes
+        if (!isVideoResponse(mime, urlStr)) return bytes
+        return try {
+            val fixed = MediaRepair.repairBytes(bytes, urlStr, dir) ?: return bytes
+            Log.i(TAG, "serving repaired video: $urlStr ${bytes.size} -> ${fixed.bytes.size} bytes")
+            if (fixed.note.isNotEmpty()) onNotice?.invoke(fixed.note)
+            fixed.bytes
+        } catch (e: Exception) {
+            Log.w(TAG, "maybeRepairVideo failed: ${e.message}")
+            bytes
+        }
+    }
+
+    private fun isVideoResponse(mime: String?, urlStr: String): Boolean {
+        val m = mime?.lowercase() ?: ""
+        if (m.startsWith("video/")) return true
+        val generic = m.isEmpty() || m.contains("octet-stream") ||
+            m.contains("binary/") || m.startsWith("application/x-")
+        if (!generic) return false
+        val path = urlStr.substringBefore('?').lowercase()
+        return VIDEO_EXTS.any { path.endsWith(it) }
+    }
 
     private fun smartFetch(
         urlStr: String,
@@ -246,13 +280,21 @@ open class DohWebViewClient(
 
             val body = response.body?.bytes()
                 ?: throw java.io.IOException("Empty response body")
+            val servedBody = maybeRepairVideo(body, urlStr, mime)
+            val repaired = servedBody !== body
 
             // Android's WebResourceResponse rejects empty reason phrases, but the
             // site's status line may omit it (e.g. "HTTP/1.1 200").
             val reason = response.message.ifEmpty { "OK" }
+            if (repaired) {
+                // 长度变了：描述原始 body 的头部全部去掉，状态改回 200
+                respHeaders.keys.removeAll {
+                    it.equals("Content-Length", true) || it.equals("Content-Range", true)
+                }
+            }
             return WebResourceResponse(
-                mime, cs, response.code, reason, respHeaders,
-                ByteArrayInputStream(body)
+                mime, cs, if (repaired) 200 else response.code, if (repaired) "OK" else reason,
+                respHeaders, ByteArrayInputStream(servedBody)
             )
         }
     }
@@ -457,13 +499,24 @@ open class DohWebViewClient(
             }
         }
 
+        // 录像修复会改变 body 长度：这时必须去掉描述原始 body 的头部
+        // （站点对带 Range 的媒体请求回 206 + Content-Range，长度对不上会让
+        //  WebView 的 FFmpegDemuxer 直接报 PIPELINE_ERROR_READ）
+        val servedBody = maybeRepairVideo(finalBody, originalUrl, contentType)
+        val repaired = servedBody !== finalBody
+        if (repaired) {
+            responseHeaders.keys.removeAll {
+                it.equals("Content-Range", true) || it.equals("Content-Length", true)
+            }
+        }
+
         return WebResourceResponse(
             contentType,
             charset,
-            statusCode,
-            reasonPhrase,
+            if (repaired) 200 else statusCode,
+            if (repaired) "OK" else reasonPhrase,
             responseHeaders,
-            ByteArrayInputStream(finalBody)
+            ByteArrayInputStream(servedBody)
         )
     }
 
@@ -573,6 +626,11 @@ open class DohWebViewClient(
 
     companion object {
         private const val TAG = "WebShareApp"
+
+        private val VIDEO_EXTS = listOf(
+            ".mp4", ".m4v", ".mov", ".mkv", ".webm", ".avi", ".3gp", ".3gpp",
+            ".ts", ".m2ts", ".flv", ".wmv", ".mpg", ".mpeg", ".rmvb", ".vob"
+        )
     }
 }
 

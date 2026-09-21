@@ -355,7 +355,14 @@ class MainActivity : AppCompatActivity() {
             "v" + packageManager.getPackageInfo(packageName, 0).versionName
         } catch (e: Exception) { "" }
 
-        return object : DohWebViewClient(dohEnabled, dohUrl, forceHttpHost, configuredHost, appVersion, shimJs) {
+        val activityContext = this
+        return object : DohWebViewClient(
+            dohEnabled, dohUrl, forceHttpHost, configuredHost, appVersion, shimJs,
+            cacheDir = cacheDir,
+            onNotice = { note ->
+                runOnUiThread { Toast.makeText(activityContext, note, Toast.LENGTH_LONG).show() }
+            }
+        ) {
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
                 if (currentSharedText != null) {
