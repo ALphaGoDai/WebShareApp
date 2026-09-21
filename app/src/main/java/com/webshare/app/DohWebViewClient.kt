@@ -124,7 +124,61 @@ open class DohWebViewClient(
         return VIDEO_EXTS.any { path.endsWith(it) }
     }
 
+    /**
+     * 视频一律"整份交付"：站点对本地录像按 Range 回 206，WebView 的媒体管线拿到一串
+     * 被截断 / 反复重取的 206，会在第一个 GOP 之后报 MEDIA_ERR_DECODE（实测：同一份字节
+     * 用不支持 Range 的服务器整个 200 发过去能播完，用 206 分段就只能播 0.9 秒）。
+     * 所以对"从 0 开始"的视频请求，主动把 Range 放大成整份，再以 200 + 完整 body 交回去。
+     * 文件超过 VIDEO_WHOLE_CAP 时只拿到一段，这时照原样按 Range 交回，不做冒险。
+     */
     private fun smartFetch(
+        urlStr: String,
+        host: String,
+        headers: Map<String, String>,
+        isMainFrame: Boolean
+    ): WebResourceResponse {
+        if (!isVideoResponse(null, urlStr) || !rangeStartsAtZero(headers)) {
+            return dispatchFetch(urlStr, host, headers, isMainFrame)
+        }
+        val eff = HashMap<String, String>()
+        for ((k, v) in headers) {
+            if (!k.equals("Range", true)) eff[k] = v
+        }
+        eff["Range"] = "bytes=0-" + (VIDEO_WHOLE_CAP - 1)
+        return serveWholeVideo(dispatchFetch(urlStr, host, eff, isMainFrame))
+    }
+
+    /** Range 请求从第 0 字节开始（没有 Range 头也算：那本来就是整份请求） */
+    private fun rangeStartsAtZero(headers: Map<String, String>): Boolean {
+        val r = headers.entries.firstOrNull { it.key.equals("Range", true) }?.value ?: return true
+        return r.trim().startsWith("bytes=0-", ignoreCase = true)
+    }
+
+    /** 206 但 Content-Range 覆盖 0..N-1（= 拿到整份文件）时改以 200 交出 */
+    private fun serveWholeVideo(resp: WebResourceResponse): WebResourceResponse {
+        if (resp.statusCode == 200) return resp            // 本来就是整份
+        val stream = resp.data ?: return resp
+        val len = if (stream is ByteArrayInputStream) stream.available() else return resp
+        val cr = resp.responseHeaders?.entries
+            ?.firstOrNull { it.key.equals("Content-Range", true) }?.value ?: return resp
+        val m = Regex("bytes\\s+(\\d+)-(\\d+)/(\\d+)").find(cr) ?: return resp
+        val start = m.groupValues[1].toLong()
+        val end = m.groupValues[2].toLong()
+        val total = m.groupValues[3].toLong()
+        if (start != 0L || end + 1 != total || len.toLong() != total) return resp
+        val h = HashMap<String, String>(resp.responseHeaders ?: emptyMap())
+        // Accept-Ranges 也要去掉：站点声明支持 Range，WebView 拿到整份 200 之后还会
+        // 按 Range 回头再取一遍（实测：4.6MB 的文件整份交付后又被请求了 196608- 那一段），
+        // 而二次按 Range 取到的分段正是播不动的根源。去掉它，行为等同于不支持 Range 的服务器。
+        h.keys.removeAll {
+            it.equals("Content-Range", true) || it.equals("Content-Length", true) ||
+                    it.equals("Accept-Ranges", true)
+        }
+        Log.i(TAG, "serving whole video as 200: $total bytes (${resp.mimeType})")
+        return WebResourceResponse(resp.mimeType, resp.encoding, 200, "OK", h, stream)
+    }
+
+    private fun dispatchFetch(
         urlStr: String,
         host: String,
         headers: Map<String, String>,
@@ -626,6 +680,9 @@ open class DohWebViewClient(
 
     companion object {
         private const val TAG = "WebShareApp"
+
+        /** 视频"整份返回"的上限：超过这个大小就退回按 Range 取，免得为了播一个片子吃掉太多内存 */
+        private const val VIDEO_WHOLE_CAP = 64L * 1024 * 1024
 
         private val VIDEO_EXTS = listOf(
             ".mp4", ".m4v", ".mov", ".mkv", ".webm", ".avi", ".3gp", ".3gpp",
