@@ -41,6 +41,20 @@ open class DohWebViewClient(
         try { DohDnsResolver(dohUrl) } catch (e: Exception) { null }
     } else null
 
+    /**
+     * 分享进来的本机文件：挂在同源虚拟地址 `/__webshare__/shared/<token>` 上，注入脚本取回来
+     * 包成 File 交给页面的上传入口。只在本进程内应答，不落盘、不出网。
+     */
+    class SharedFile(
+        val name: String,
+        val mime: String,
+        val size: Long,
+        val open: () -> java.io.InputStream?
+    )
+
+    @Volatile
+    var sharedFiles: Map<String, SharedFile> = emptyMap()
+
     // Hosts that rejected cleartext but work over TLS
     private val tlsOnlyHosts = ConcurrentHashMap<String, Boolean>()
 
@@ -68,6 +82,12 @@ open class DohWebViewClient(
 
         var urlStr = url.toString()
         val host = url.host ?: ""
+
+        // 分享文件的虚拟地址：先于其它逻辑应答（都是 GET，同源，token 每次分享都换）
+        val path = url.path ?: ""
+        if (path.startsWith(SHARED_PATH_PREFIX)) {
+            return serveSharedFile(path.removePrefix(SHARED_PATH_PREFIX))
+        }
 
         // WebView (especially Huawei/HarmonyOS) auto-upgrades http to https.
         // Undo the upgrade when the configured site is http://.
@@ -678,8 +698,40 @@ open class DohWebViewClient(
         return true
     }
 
+    /** 把分享进来的文件交给页面（同源虚拟地址，注入脚本 fetch 回来包成 File） */
+    private fun serveSharedFile(token: String): WebResourceResponse {
+        val headers = HashMap<String, String>()
+        headers["Cache-Control"] = "no-store"
+        val file = sharedFiles[token]
+        if (file == null) {
+            Log.w(TAG, "shared file token unknown: $token")
+            return WebResourceResponse(
+                "text/plain", "utf-8", 404, "Not Found", headers,
+                ByteArrayInputStream("shared file not found".toByteArray())
+            )
+        }
+        if (file.size > 0) headers["Content-Length"] = file.size.toString()
+        return try {
+            val stream = file.open() ?: throw java.io.IOException("打不开")
+            Log.i(TAG, "serving shared file to page: ${file.name} (${file.size} B, ${file.mime})")
+            WebResourceResponse(
+                file.mime.ifEmpty { "application/octet-stream" }, null, 200, "OK",
+                headers, stream
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "shared file open failed: ${file.name} (${e.message})")
+            WebResourceResponse(
+                "text/plain", "utf-8", 500, "Error", headers,
+                ByteArrayInputStream("shared file open failed".toByteArray())
+            )
+        }
+    }
+
     companion object {
         private const val TAG = "WebShareApp"
+
+        /** 分享文件的虚拟地址前缀：路径里带一次性 token，页面同源 fetch */
+        const val SHARED_PATH_PREFIX = "/__webshare__/shared/"
 
         /** 视频"整份返回"的上限：超过这个大小就退回按 Range 取，免得为了播一个片子吃掉太多内存 */
         private const val VIDEO_WHOLE_CAP = 64L * 1024 * 1024

@@ -8,6 +8,7 @@ import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.OpenableColumns
 import android.util.Log
 import android.view.View
 import android.webkit.ValueCallback
@@ -24,6 +25,7 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import com.google.android.material.floatingactionbutton.FloatingActionButton
+import java.util.UUID
 
 class MainActivity : AppCompatActivity() {
 
@@ -39,6 +41,12 @@ class MainActivity : AppCompatActivity() {
 
     /** 分享进来的本机文件：页面里的上传入口一开选择器就直接交给它，不再让用户去相册里翻 */
     private var pendingShareUris: List<Uri> = emptyList()
+
+    /** 分享进来的文件在同源虚拟地址上的映射（token -> 文件），供注入脚本取回 */
+    private var currentSharedFiles: Map<String, DohWebViewClient.SharedFile> = emptyMap()
+
+    /** 页面加载完成后要注入的「自动上传」脚本；空表示这次分享不需要自动上传 */
+    private var pendingAutoUploadJs: String? = null
 
     private var settingsLauncher: ActivityResultLauncher<Intent>? = null
 
@@ -162,6 +170,8 @@ class MainActivity : AppCompatActivity() {
                 currentSharedText = intent.getStringExtra(Intent.EXTRA_TEXT) ?: ""
                 currentSharedType = "text"
                 pendingShareUris = emptyList()
+                currentSharedFiles = emptyMap()
+                pendingAutoUploadJs = null
             } else {
                 val uris = sharedStreams(intent)
                 if (uris.isNotEmpty()) {
@@ -171,16 +181,21 @@ class MainActivity : AppCompatActivity() {
                     currentSharedType = type.substringBefore('/').ifEmpty { "file" }
                     ensureMediaReadPermission(type)
                     webAppInterface.registerPickedFiles(uris)
+                    prepareAutoUpload(uris)
                 } else {
                     currentSharedText = null
                     currentSharedType = "none"
                     pendingShareUris = emptyList()
+                    currentSharedFiles = emptyMap()
+                    pendingAutoUploadJs = null
                 }
             }
         } else {
             currentSharedText = null
             currentSharedType = "none"
             pendingShareUris = emptyList()
+            currentSharedFiles = emptyMap()
+            pendingAutoUploadJs = null
         }
         loadUrl()
     }
@@ -210,7 +225,8 @@ class MainActivity : AppCompatActivity() {
         if (missing.isNotEmpty()) mediaPermissionLauncher.launch(missing.toTypedArray())
     }
 
-    /** 页面这次要的类型和分享进来的文件对得上吗？对不上就走普通选择器，免得往输入框里塞错东西 */    private fun shareMatchesAccept(uris: List<Uri>, params: WebChromeClient.FileChooserParams?): Boolean {
+    /** 页面这次要的类型和分享进来的文件对得上吗？对不上就走普通选择器，免得往输入框里塞错东西 */
+    private fun shareMatchesAccept(uris: List<Uri>, params: WebChromeClient.FileChooserParams?): Boolean {
         val accepts = params?.acceptTypes?.map { it.trim().lowercase() }?.filter { it.isNotEmpty() }
         if (accepts.isNullOrEmpty() || accepts.contains("*/*")) return true
 
@@ -226,6 +242,76 @@ class MainActivity : AppCompatActivity() {
             }
         }
         return false
+    }
+
+    /**
+     * 「分享完自动保存」：网页读不到 content://，也没法在没有用户手势时打开文件选择器，
+     * 所以这一步只能由 App 做——把文件挂到同源虚拟地址上，注入脚本取回来包成 File
+     * 塞进页面的 <input type="file"> 再触发 change，走的还是站点自己的上传逻辑
+     * （保存目录、进度提示、失败处理都不变）。页面里没有上传入口就什么都不做，
+     * 保留"点上传时直接回填分享文件"那条老路。
+     */
+    private fun prepareAutoUpload(uris: List<Uri>) {
+        val files = linkedMapOf<String, DohWebViewClient.SharedFile>()
+        val specs = mutableListOf<String>()
+        for (uri in uris) {
+            var name: String? = null
+            var size = -1L
+            try {
+                contentResolver.query(
+                    uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null
+                )?.use { c ->
+                    if (c.moveToFirst()) {
+                        val nameIdx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                        if (nameIdx >= 0 && !c.isNull(nameIdx)) name = c.getString(nameIdx)
+                        val sizeIdx = c.getColumnIndex(OpenableColumns.SIZE)
+                        if (sizeIdx >= 0 && !c.isNull(sizeIdx)) size = c.getLong(sizeIdx)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "shared file metadata failed: $uri (${e.message})")
+            }
+            val fileName = name ?: uri.lastPathSegment ?: "shared-file"
+            val mime = try { contentResolver.getType(uri) } catch (e: Exception) { null }
+            val resolver = contentResolver
+            val token = UUID.randomUUID().toString().replace("-", "")
+            files[token] = DohWebViewClient.SharedFile(fileName, mime ?: guessMime(fileName), size) {
+                try { resolver.openInputStream(uri) } catch (e: Exception) { null }
+            }
+            specs.add(
+                "{url:'${DohWebViewClient.SHARED_PATH_PREFIX}$token'," +
+                    "name:'${escapeJs(fileName)}',mime:'${escapeJs(mime ?: guessMime(fileName))}'}"
+            )
+        }
+        if (files.isEmpty()) {
+            currentSharedFiles = emptyMap()
+            pendingAutoUploadJs = null
+            return
+        }
+        currentSharedFiles = files
+        pendingAutoUploadJs = "(function(){var specs=[${specs.joinToString(",")}];$AUTO_UPLOAD_JS})();"
+        Log.i(TAG, "auto upload prepared: ${files.values.joinToString { it.name }}")
+    }
+
+    private fun guessMime(name: String): String {
+        return when (name.substringAfterLast('.', "").lowercase()) {
+            "mp4", "m4v" -> "video/mp4"
+            "mov" -> "video/quicktime"
+            "mkv" -> "video/x-matroska"
+            "webm" -> "video/webm"
+            "avi" -> "video/x-msvideo"
+            "3gp" -> "video/3gpp"
+            "jpg", "jpeg" -> "image/jpeg"
+            "png" -> "image/png"
+            "gif" -> "image/gif"
+            "webp" -> "image/webp"
+            "mp3" -> "audio/mpeg"
+            "m4a" -> "audio/mp4"
+            "wav" -> "audio/wav"
+            "aac" -> "audio/aac"
+            "flac" -> "audio/flac"
+            else -> "application/octet-stream"
+        }
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -458,6 +544,13 @@ class MainActivity : AppCompatActivity() {
                     }
                     view?.evaluateJavascript(js, null)
                 }
+                // 分享进来的文件：页面一就绪就把文件塞给它的上传入口，用户不用再点一下
+                val auto = pendingAutoUploadJs
+                if (auto != null && view != null) {
+                    pendingAutoUploadJs = null
+                    view.evaluateJavascript(auto, null)
+                    view.postDelayed({ reportAutoUpload(view) }, 1800)
+                }
             }
         }
     }
@@ -541,7 +634,26 @@ class MainActivity : AppCompatActivity() {
             baseUrl
         }
 
+        // 分享文件的虚拟地址挂在当前 client 上（client 在改设置后会重建，所以要随 load 一起挂）
+        (webView.webViewClient as? DohWebViewClient)?.sharedFiles = currentSharedFiles
+
         webView.loadUrl(finalUrl)
+    }
+
+    /** 读回注入脚本的结果：走通就轻描一句，没走通提醒用户手动点页面的上传入口 */
+    private fun reportAutoUpload(view: WebView) {
+        view.evaluateJavascript("(window.__webshareAutoUploadResult||'')") { raw ->
+            val result = raw?.trim('"') ?: ""
+            Log.i(TAG, "auto upload result: $result")
+            when (result) {
+                "dispatched", "hook" ->
+                    Toast.makeText(this, "已把分享的文件交给站点自动上传", Toast.LENGTH_SHORT).show()
+                "running" ->
+                    Toast.makeText(this, "正在把分享的文件交给站点…", Toast.LENGTH_SHORT).show()
+                else ->
+                    Toast.makeText(this, "没能自动上传（$result），点页面上的上传入口即可", Toast.LENGTH_LONG).show()
+            }
+        }
     }
 
     private fun appendSharedContent(baseUrl: String, shared: String): String {
@@ -592,5 +704,48 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "WebShareApp"
+
+        /**
+         * 注入到页面里的自动上传脚本（前面会拼上 specs 数组）。取回分享文件的字节包成 File，
+         * 优先走页面自己声明的 window.webshareAutoUpload(files)，否则塞给第一个
+         * <input type="file"> 并触发 change —— 站点里的 onchange 处理器（比如 send 站点的
+         * uploadPicked）就会照常跑完整套上传。结果写进 window.__webshareAutoUploadResult
+         * 供 App 读回来提示用户。
+         */
+        private val AUTO_UPLOAD_JS = """
+            window.__webshareAutoUploadResult='running';
+            (async function(){
+              try{
+                var files=[];
+                for(var i=0;i<specs.length;i++){
+                  var s=specs[i];
+                  var r=await fetch(s.url,{cache:'no-store'});
+                  if(!r.ok) throw new Error('HTTP '+r.status);
+                  var b=await r.blob();
+                  files.push(new File([b], s.name, {type:s.mime}));
+                }
+                if(typeof window.webshareAutoUpload==='function'){
+                  window.webshareAutoUpload(files);
+                  window.__webshareAutoUploadResult='hook';
+                  return;
+                }
+                var inputs=document.querySelectorAll('input[type=file]');
+                if(!inputs.length){ window.__webshareAutoUploadResult='no-input'; return; }
+                var pick=inputs[0];
+                var family=(files[0].type.split('/')[0]||'');
+                for(var j=0;j<inputs.length;j++){
+                  var acc=inputs[j].getAttribute('accept')||'';
+                  if(acc && acc.indexOf('*/*')<0 && acc.indexOf(family)>=0){ pick=inputs[j]; break; }
+                }
+                var dt=new DataTransfer();
+                for(var k=0;k<files.length;k++) dt.items.add(files[k]);
+                pick.files=dt.files;
+                pick.dispatchEvent(new Event('change',{bubbles:true}));
+                window.__webshareAutoUploadResult='dispatched';
+              }catch(e){
+                window.__webshareAutoUploadResult='error: '+((e&&e.message)||e);
+              }
+            })();
+        """.trimIndent()
     }
 }

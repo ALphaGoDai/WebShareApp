@@ -5,7 +5,7 @@
 ## 功能特性
 
 - **WebView 网页挂载**：在应用内加载指定网页
-- **接收分享内容**：接收来自其他应用分享的文本（网址）、图片和**视频 / 音频**；分享进来的相册文件在页面里点上传时直接使用，不用再翻一遍相册
+- **接收分享内容**：接收来自其他应用分享的文本（网址）、图片和**视频 / 音频**；分享进来的文件自动送进页面的上传入口（页面没有上传入口时再手动点）
 - **设置界面**：可配置打开的网页地址
 - **下载到手机**：网页里的下载按钮 → 确认框选目录 → 走 App 自己的 DNS/TLS 通道下载，带进度通知
 - **剪贴板可用**：`http://` 源下网页的「复制 / 粘贴」按钮也能正常工作（桥接 App 剪贴板）
@@ -262,21 +262,24 @@ App 的三种处理：
 「已修复录像尾部损坏帧（丢弃 N 个损坏音频帧）」。超过 32 MB 的文件不修（采样表要整包进内存，
 太大就跳过，交给服务端转码兜底）；超过 64 MB 的视频仍按原来的 Range 方式交付。
 
-### 方式 K：把手机里的文件分享给站点（v1.0.20 起）
+### 方式 K：把手机里的文件分享给站点（v1.0.20 起；v1.0.21 起自动上传）
 
 相册 / 文件管理器里选「分享」时，系统分享面板里会出现本应用（`ACTION_SEND` 与
 `SEND_MULTIPLE`，类型覆盖 `image/*`、`video/*`、`audio/*`，和站点 `<input accept>` 一致）。
-分享一个视频进来之后：
+分享进来之后**不用再点任何按钮**：
 
 1. App 记下文件的 `content://` 地址、登记成「刚选过的文件」，带在网址后面打开站点
    （`?shared=...`，走的就是第 2 步配的那套分享内容传递）；
-2. 站点认出这是本机文件（网页读不到 `content://` 的内容），显示「本机文件」提示和上传入口；
-3. 用户在页面里点上传 → 打开文件选择器的那一刻，App 直接把分享的文件回填给输入框
-   （不再弹相册选择器；页面这次要的类型和分享的文件对不上时才回退到普通选择器），
-   接着走方式 H 的 multipart 通道上传。
+2. 页面一加载完，App 把文件挂到**同源虚拟地址**上，注入脚本取回来包成 `File`，塞进页面的
+   `<input type="file">` 再触发 `change` —— 站点自己的上传处理器（例如 send 站点的
+   `uploadPicked`）照常跑：存到「待分类」、进度提示、失败处理都不变；
+3. 页面里没有上传入口、或文件取不回来时，App 提示一句，点页面上的上传入口照旧能传
+   （那条路打开文件选择器时 App 会把分享的文件直接回填，不用再翻一遍相册）。
 
-文件全程流式读取：不复制、不改名、不进内存。读相册文件要权限——Android 13+ 是「照片和视频」
-（`READ_MEDIA_IMAGES/VIDEO/AUDIO`），更早版本是存储权限，第一次分享时申请一次。
+网页端自己做不了这一步：网页读不到 `content://`，也没法在没有用户手势时打开文件选择器，
+所以「分享完自动保存」只能由 App 把文件送进页面的输入框。文件全程流式读取，不复制、不改名、
+不进内存；读相册文件要权限——Android 13+ 是「照片和视频」（`READ_MEDIA_IMAGES/VIDEO/AUDIO`），
+更早版本是存储权限，第一次分享时申请一次。
 
 ### 3. 配置安全 DNS (DoH)
 
@@ -366,11 +369,16 @@ App 的三种处理：
 **下载路径**（`DownloadService.kt`）——下完后读回文件跑同一套 `MediaRepair`，修好了就覆盖写回，
 识别不了 / 不需要修（返回 null）就保持原样，绝不动健康文件。
 
-**分享进来的文件**（`MainActivity.kt`）——`ACTION_SEND` / `SEND_MULTIPLE` 的 `EXTRA_STREAM`
-取 `content://`：先登记进 `WebAppInterface` 的「刚选过的文件」表（multipart 上传按 文件名+大小
-找内容），再在页面开文件选择器时**直接回填**（`onShowFileChooser`，类型不匹配才回退到选择器）。
-`EXTRA_STREAM` 既可能是单个 `Uri` 也可能是 `List`，直接从 extras 里按类型取，不走
-`getParcelableExtra`（后者在类型不符时可能抛 `ClassCastException`）。读相册文件要
+**分享进来的文件**（`MainActivity.kt` + `DohWebViewClient.kt`）——`ACTION_SEND` / `SEND_MULTIPLE`
+的 `EXTRA_STREAM` 取 `content://`：先登记进 `WebAppInterface` 的「刚选过的文件」表（multipart 上传
+按 文件名+大小 找内容）。**自动上传**走这样一条路：文件挂到同源虚拟地址
+`/__webshare__/shared/<token>`（拦截器本地应答，不落盘、不出网，token 每次分享都换），页面加载完
+注入脚本 `fetch` 回来包成 `File`，塞进页面第一个 `<input type="file">` 并派发 `change` ——
+站点自己的上传逻辑照常跑，用户零点击；页面若想接管，声明 `window.webshareAutoUpload(files)` 即可。
+注入结果写进 `window.__webshareAutoUploadResult`，App 读回来决定提示（`dispatched` / `hook` /
+`no-input` / `error: ...`）。兜底：页面开文件选择器时把分享的文件直接回填（`onShowFileChooser`，
+类型不匹配才回退到普通选择器）。`EXTRA_STREAM` 既可能是单个 `Uri` 也可能是 `List`，直接从 extras
+里按类型取，不走 `getParcelableExtra`（后者在类型不符时可能抛 `ClassCastException`）。读相册文件要
 `READ_MEDIA_VIDEO` / `READ_MEDIA_AUDIO`（13+）或 `READ_EXTERNAL_STORAGE`（≤12）——只声明
 `READ_MEDIA_IMAGES` 时 MediaProvider 会对视频 uri 抛
 `SecurityException: com.webshare.app has no access to content://media/...`，清单里补齐、
