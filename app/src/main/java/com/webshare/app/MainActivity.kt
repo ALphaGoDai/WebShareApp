@@ -24,15 +24,12 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
-import com.google.android.material.floatingactionbutton.FloatingActionButton
 import java.util.UUID
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var webView: WebView
     private lateinit var progressBar: ProgressBar
-    private lateinit var fabSettings: FloatingActionButton
-    private lateinit var fabRefresh: FloatingActionButton
     private lateinit var settingsManager: SettingsManager
     private lateinit var webAppInterface: WebAppInterface
 
@@ -138,11 +135,9 @@ class MainActivity : AppCompatActivity() {
 
         webView = findViewById(R.id.webView)
         progressBar = findViewById(R.id.progressBar)
-        fabSettings = findViewById(R.id.fabSettings)
-        fabRefresh = findViewById(R.id.fabRefresh)
 
         setupWebView()
-        setupFab()
+        setupBottomBar()
         setupBackNavigation()
 
         settingsLauncher = registerForActivityResult(
@@ -570,19 +565,15 @@ class MainActivity : AppCompatActivity() {
         return sb.toString()
     }
 
-    private fun setupFab() {
-        fabSettings.setOnClickListener {
-            settingsLauncher?.launch(Intent(this, SettingsActivity::class.java))
-        }
-
-        // Refresh: tap = normal refresh, long press = force refresh (clear cache)
-        fabRefresh.setOnClickListener {
+    private fun setupBottomBar() {
+        // 轻点=普通刷新，长按=强制刷新（清缓存）
+        findViewById<View>(R.id.navRefresh).setOnClickListener {
             webView.reload()
         }
-
-        fabRefresh.setOnLongClickListener {
+        findViewById<View>(R.id.navRefresh).setOnLongClickListener {
             // Visual feedback for long press
-            fabRefresh.alpha = 0.5f
+            val bar = findViewById<View>(R.id.bottomBar)
+            bar.alpha = 0.5f
             Toast.makeText(this, "正在清除缓存并刷新...", Toast.LENGTH_SHORT).show()
 
             // Clear all caches
@@ -599,10 +590,18 @@ class MainActivity : AppCompatActivity() {
             // Reset cache mode after a delay
             webView.postDelayed({
                 webView.settings.cacheMode = WebSettings.LOAD_DEFAULT
-                fabRefresh.alpha = 1.0f
+                bar.alpha = 1.0f
             }, 3000)
 
             true
+        }
+
+        findViewById<View>(R.id.navSettings).setOnClickListener {
+            settingsLauncher?.launch(Intent(this, SettingsActivity::class.java))
+        }
+
+        findViewById<View>(R.id.navDownloads).setOnClickListener {
+            startActivity(Intent(this, DownloadsActivity::class.java))
         }
     }
 

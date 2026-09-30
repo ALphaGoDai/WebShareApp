@@ -70,6 +70,12 @@
             android:label="@string/settings_title"
             android:parentActivityName=".MainActivity" />
 
+        <!-- 已下载：浏览器风格的下载记录页 -->
+        <activity
+            android:name=".DownloadsActivity"
+            android:exported="false"
+            android:label="@string/downloads_title" />
+
         <!-- 网页资源保存到手机：走 App 自己的 DNS/TLS 通道，前台服务避免中途被杀 -->
         <service
             android:name=".DownloadService"

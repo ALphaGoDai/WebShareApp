@@ -43,6 +43,8 @@ class DownloadService : Service() {
     override fun onCreate() {
         super.onCreate()
         ensureChannel()
+        // 服务每次拉起都意味着上一轮下载已经结束：把悬空的「正在下载」记录补标成失败
+        DownloadHistory(this).failStale("已中断（下载未完成）")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -60,13 +62,40 @@ class DownloadService : Service() {
         startProgressForeground(name, 0, -1)
         active.incrementAndGet()
 
+        // 记进下载历史：已下载页面据此显示进度/结果（先给占位大小，进度回调里补）
+        val record = DownloadRecord(
+            id = nextId(),
+            url = url,
+            name = name,
+            mime = mime,
+            referer = referer,
+            treeUri = treeUri,
+            location = DownloadRecord.locationLabel(treeUri),
+            startedAt = System.currentTimeMillis()
+        )
+        val history = DownloadHistory(this)
+        history.add(record)
+
         executor.execute {
             var ok = false
             var error: String? = null
             var savedUri: Uri? = null
             var repairNote = ""
+            var lastHistoryWrite = 0L
+            var lastDone = 0L
+            var lastTotal = -1L
             try {
                 savedUri = download(url, name, mime, treeUri, referer) { done, total ->
+                    lastDone = done
+                    lastTotal = total
+                    val now = System.currentTimeMillis()
+                    if (now - lastHistoryWrite > 1000) {
+                        lastHistoryWrite = now
+                        history.update(record.id) { r ->
+                            r.received = done
+                            if (total > 0) r.total = total
+                        }
+                    }
                     notifyProgress(name, done, total)
                 }
                 repairNote = tryRepairDownloaded(url, mime, savedUri)
@@ -77,14 +106,49 @@ class DownloadService : Service() {
 
             val remaining = active.decrementAndGet()
             if (ok && savedUri != null) {
+                val info = queryNameSize(savedUri)
+                history.update(record.id) { r ->
+                    r.status = DownloadRecord.STATUS_DONE
+                    r.savedUri = savedUri.toString()
+                    r.repairNote = repairNote.takeIf { it.isNotEmpty() }
+                    r.savedName = info.first
+                    // MediaStore 对刚写完的行可能不回 SIZE，退回实测字节数
+                    r.size = if (info.second >= 0) info.second else lastDone
+                    r.received = r.size
+                    if (r.total <= 0 && lastTotal > 0) r.total = lastTotal
+                }
                 notifyDone(name, savedUri, mime, repairNote)
             } else {
+                history.update(record.id) { r ->
+                    r.status = DownloadRecord.STATUS_FAILED
+                    r.error = error
+                }
                 notifyFailed(name, error ?: "下载失败")
             }
             if (remaining <= 0) stopSelfSafely()
         }
 
         return START_NOT_STICKY
+    }
+
+    /** 落盘后的真实文件名（SAF 重名会自动改名）和大小 */
+    private fun queryNameSize(uri: Uri): Pair<String?, Long> {
+        var name: String? = null
+        var size = -1L
+        try {
+            contentResolver.query(
+                uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null
+            )?.use { c ->
+                if (c.moveToFirst()) {
+                    val ni = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    if (ni >= 0 && !c.isNull(ni)) name = c.getString(ni)
+                    val si = c.getColumnIndex(OpenableColumns.SIZE)
+                    if (si >= 0 && !c.isNull(si)) size = c.getLong(si)
+                }
+            }
+        } catch (e: Exception) {
+        }
+        return name to size
     }
 
     override fun onDestroy() {
@@ -211,9 +275,15 @@ class DownloadService : Service() {
     private class Target(
         val uri: Uri,
         val output: OutputStream,
+        // MediaStore 的插入行默认 IS_PENDING=1，写完后要清掉，否则其他应用看不见、
+        // 7 天后还会被系统当垃圾清掉；SAF 目录没有这一步
+        private val onPublish: (() -> Unit)? = null,
         private val onDelete: () -> Unit
     ) {
-        fun finish() { try { output.close() } catch (_: Exception) {} }
+        fun finish() {
+            try { output.close() } catch (_: Exception) {}
+            try { onPublish?.invoke() } catch (_: Exception) {}
+        }
         fun delete() { try { output.close() } catch (_: Exception) {}; onDelete() }
     }
 
@@ -232,12 +302,22 @@ class DownloadService : Service() {
                     MediaStore.MediaColumns.RELATIVE_PATH,
                     Environment.DIRECTORY_DOWNLOADS
                 )
+                put(MediaStore.MediaColumns.IS_PENDING, 1)
             }
             val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
                 ?: throw IOException("无法在系统下载目录创建文件")
             val out = resolver.openOutputStream(uri)
                 ?: throw IOException("无法写入系统下载目录")
-            return Target(uri, out) { try { resolver.delete(uri, null, null) } catch (_: Exception) {} }
+            val publish: () -> Unit = {
+                val done = ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }
+                try { resolver.update(uri, done, null, null) } catch (e: Exception) {
+                    Log.w(TAG, "clear IS_PENDING failed: ${e.message}")
+                }
+                Unit
+            }
+            return Target(uri, out, publish) {
+                try { resolver.delete(uri, null, null) } catch (_: Exception) {}
+            }
         }
 
         val tree = Uri.parse(treeUri)
@@ -416,6 +496,11 @@ class DownloadService : Service() {
     companion object {
         private const val CHANNEL_ID = "webshare_downloads"
         private const val FOREGROUND_ID = 1
+        private val idSeq = java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis())
+
+        /** 下载记录的唯一 id（毫秒时间戳打底，同毫秒内递增） */
+        fun nextId(): Long = idSeq.incrementAndGet()
+
         const val ACTION_DOWNLOAD = "com.webshare.app.action.DOWNLOAD"
         const val EXTRA_URL = "url"
         const val EXTRA_NAME = "name"

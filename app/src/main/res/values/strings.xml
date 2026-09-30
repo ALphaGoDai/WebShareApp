@@ -1,4 +1,5 @@
 <resources>
     <string name="app_name">网页分享助手</string>
     <string name="settings_title">设置</string>
+    <string name="downloads_title">已下载</string>
 </resources>
