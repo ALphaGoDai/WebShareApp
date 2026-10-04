@@ -26,7 +26,7 @@
             android:visibility="gone" />
     </FrameLayout>
 
-    <!-- 底部导航栏：刷新（长按=清缓存强刷）/ 设置 / 已下载 -->
+    <!-- 底部导航栏：设置 / 已下载 / 刷新（长按=清缓存强刷） -->
     <LinearLayout
         android:id="@+id/bottomBar"
         android:layout_width="match_parent"
@@ -34,31 +34,6 @@
         android:orientation="horizontal"
         android:background="@color/white"
         android:elevation="8dp">
-
-        <LinearLayout
-            android:id="@+id/navRefresh"
-            android:layout_width="0dp"
-            android:layout_height="match_parent"
-            android:layout_weight="1"
-            android:orientation="vertical"
-            android:gravity="center"
-            android:background="?attr/selectableItemBackgroundBorderless">
-
-            <ImageView
-                android:layout_width="24dp"
-                android:layout_height="24dp"
-                android:src="@drawable/ic_nav_refresh"
-                android:tint="@color/purple_500"
-                android:contentDescription="刷新页面" />
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="2dp"
-                android:text="刷新"
-                android:textSize="10sp"
-                android:textColor="#5F6368" />
-        </LinearLayout>
 
         <LinearLayout
             android:id="@+id/navSettings"
@@ -109,5 +84,31 @@
                 android:textSize="10sp"
                 android:textColor="#5F6368" />
         </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/navRefresh"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:orientation="vertical"
+            android:gravity="center"
+            android:background="?attr/selectableItemBackgroundBorderless">
+
+            <ImageView
+                android:layout_width="24dp"
+                android:layout_height="24dp"
+                android:src="@drawable/ic_nav_refresh"
+                android:tint="@color/purple_500"
+                android:contentDescription="刷新页面" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="2dp"
+                android:text="刷新"
+                android:textSize="10sp"
+                android:textColor="#5F6368" />
+        </LinearLayout>
+
     </LinearLayout>
 </LinearLayout>
