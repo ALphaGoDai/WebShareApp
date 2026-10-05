@@ -5,18 +5,26 @@ import android.annotation.SuppressLint
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.OpenableColumns
 import android.util.Log
+import android.view.LayoutInflater
 import android.view.View
+import android.view.ViewGroup
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.EditText
+import android.widget.FrameLayout
+import android.widget.ImageButton
+import android.widget.ImageView
 import android.widget.ProgressBar
+import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.ActivityResultLauncher
@@ -24,14 +32,37 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.recyclerview.widget.GridLayoutManager
+import androidx.recyclerview.widget.RecyclerView
 import java.util.UUID
 
 class MainActivity : AppCompatActivity() {
 
-    private lateinit var webView: WebView
     private lateinit var progressBar: ProgressBar
     private lateinit var settingsManager: SettingsManager
-    private lateinit var webAppInterface: WebAppInterface
+    private lateinit var webViewContainer: FrameLayout
+    private lateinit var tabSwitcher: FrameLayout
+    private lateinit var tabGrid: RecyclerView
+    private lateinit var tabBadge: TextView
+
+    /** 多标签页：每页一个独立 WebView 和桥接实例，切换时换入换出 */
+    private inner class Tab(
+        val iface: WebAppInterface,
+        val webView: WebView,
+        var title: String,
+        var url: String?,
+        var thumb: Bitmap?
+    )
+
+    private val tabs = mutableListOf<Tab>()
+    private var currentIndex = -1
+    private val tabAdapter by lazy { TabAdapter() }
+
+    /** 当前标签页的 WebView / 桥接（单标签页时代各处直接用的字段都改走这两个入口，行为不变） */
+    private val webView: WebView
+        get() = tabs[currentIndex].webView
+    private val webAppInterface: WebAppInterface
+        get() = tabs[currentIndex].iface
 
     private var currentSharedText: String? = null
     private var currentSharedType: String = "none"
@@ -131,12 +162,13 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
 
         settingsManager = SettingsManager(this)
-        webAppInterface = WebAppInterface(this)
-
-        webView = findViewById(R.id.webView)
         progressBar = findViewById(R.id.progressBar)
+        webViewContainer = findViewById(R.id.webViewContainer)
+        tabSwitcher = findViewById(R.id.tabSwitcher)
+        tabGrid = findViewById(R.id.tabGrid)
+        tabBadge = findViewById(R.id.tabBadge)
 
-        setupWebView()
+        initTabs()
         setupBottomBar()
         setupBackNavigation()
 
@@ -309,12 +341,31 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** 首个标签页 + 切换器网格 */
+    private fun initTabs() {
+        tabGrid.layoutManager = GridLayoutManager(this, 2)
+        tabGrid.adapter = tabAdapter
+        findViewById<View>(R.id.btnNewTab).setOnClickListener { showAddressBar() }
+        addTab()
+    }
+
+    /** 新建一个标签页（建好即成为当前页）；起始地址由调用方决定 */
+    private fun addTab(): Tab {
+        val iface = WebAppInterface(this)
+        val wv = WebView(this)
+        configureWebView(wv, iface)
+        val tab = Tab(iface, wv, getString(R.string.app_name), null, null)
+        tabs.add(tab)
+        switchTo(tabs.size - 1)
+        return tab
+    }
+
     @SuppressLint("SetJavaScriptEnabled")
-    private fun setupWebView() {
+    private fun configureWebView(wv: WebView, iface: WebAppInterface) {
         // 允许 Chrome 远程调试（chrome://inspect / adb forward），排查网页问题时必需
         WebView.setWebContentsDebuggingEnabled(true)
 
-        val settings = webView.settings
+        val settings = wv.settings
         settings.javaScriptEnabled = true
         settings.domStorageEnabled = true
         settings.allowFileAccess = true
@@ -332,9 +383,10 @@ class MainActivity : AppCompatActivity() {
         // 页面里的播放器在自动重试/转码完成后会直接 play()，此时用户手势可能已过期
         settings.mediaPlaybackRequiresUserGesture = false
 
-        webView.webViewClient = createWebViewClient()
-        webView.webChromeClient = object : WebChromeClient() {
+        wv.webViewClient = createWebViewClient()
+        wv.webChromeClient = object : WebChromeClient() {
             override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                if (view !== tabs.getOrNull(currentIndex)?.webView) return  // 后台标签页的进度不上屏
                 if (newProgress < 100) {
                     progressBar.visibility = View.VISIBLE
                     progressBar.progress = newProgress
@@ -423,12 +475,12 @@ class MainActivity : AppCompatActivity() {
 
         // 网页里的下载链接（<a download> / Content-Disposition: attachment）：
         // 不设这个监听器，点击就是彻底没反应——WebView 自己不做下载
-        webView.setDownloadListener { url, _: String?, contentDisposition, mimeType, contentLength ->
+        wv.setDownloadListener { url, _: String?, contentDisposition, mimeType, contentLength ->
             onDownloadRequested(url, contentDisposition, mimeType, contentLength)
         }
 
-        webView.addJavascriptInterface(webAppInterface, "Android")
-        webAppInterface.attach(webView, settingsManager.dohEnabled, settingsManager.dohUrl)
+        wv.addJavascriptInterface(iface, "Android")
+        iface.attach(wv, settingsManager.dohEnabled, settingsManager.dohUrl)
     }
 
     /** 点击网页下载按钮：先问保存到哪个目录，再交给前台服务走 App 自己的 DNS/TLS 通道下载 */
@@ -529,6 +581,11 @@ class MainActivity : AppCompatActivity() {
         ) {
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
+                // 记下标签页标题/地址，切换器卡片和角标用
+                tabs.firstOrNull { it.webView === view }?.let { tab ->
+                    tab.title = view?.title?.takeIf { it.isNotBlank() } ?: tab.title
+                    tab.url = url ?: tab.url
+                }
                 if (currentSharedText != null) {
                     val js = buildString {
                         append("if(typeof window.onSharedContent==='function'){")
@@ -603,11 +660,20 @@ class MainActivity : AppCompatActivity() {
         findViewById<View>(R.id.navDownloads).setOnClickListener {
             startActivity(Intent(this, DownloadsActivity::class.java))
         }
+
+        findViewById<View>(R.id.navTabs).setOnClickListener {
+            openTabSwitcher()
+        }
     }
 
     private fun setupBackNavigation() {
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
+                // 标签页切换器开着时，返回先关它
+                if (tabSwitcher.visibility == View.VISIBLE) {
+                    hideTabSwitcher()
+                    return
+                }
                 if (webView.canGoBack()) {
                     webView.goBack()
                 } else {
@@ -664,9 +730,173 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun reloadWebView() {
-        webView.webViewClient = createWebViewClient()
-        webAppInterface.attach(webView, settingsManager.dohEnabled, settingsManager.dohUrl)
+        // 设置改动（网址/DoH）对每个标签页生效：重建 client、刷新桥接参数；当前页重新加载
+        for (tab in tabs) {
+            tab.webView.webViewClient = createWebViewClient()
+            tab.iface.attach(tab.webView, settingsManager.dohEnabled, settingsManager.dohUrl)
+        }
         loadUrl()
+    }
+
+    // ---------- 多标签页 ----------
+
+    private fun switchTo(index: Int) {
+        if (index !in tabs.indices) return
+        if (currentIndex in tabs.indices && currentIndex != index) {
+            captureThumb(tabs[currentIndex])
+        }
+        currentIndex = index
+        val wv = tabs[index].webView
+        if (wv.parent !== webViewContainer) {
+            webViewContainer.removeAllViews()
+            webViewContainer.addView(
+                wv,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
+                )
+            )
+        }
+        updateTabBadge()
+        hideTabSwitcher()
+    }
+
+    private fun closeTab(index: Int) {
+        if (index !in tabs.indices) return
+        if (tabs.size == 1) {
+            // 最后一个标签页：关掉就退出应用
+            finish()
+            return
+        }
+        val wasCurrent = index == currentIndex
+        val tab = tabs.removeAt(index)
+        webViewContainer.removeView(tab.webView)
+        tab.webView.destroy()
+        currentIndex = when {
+            index < currentIndex -> currentIndex - 1
+            wasCurrent -> index.coerceAtMost(tabs.size - 1)
+            else -> currentIndex
+        }
+        if (wasCurrent) {
+            val wv = tabs[currentIndex].webView
+            webViewContainer.removeAllViews()
+            webViewContainer.addView(
+                wv,
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
+                )
+            )
+        }
+        updateTabBadge()
+        tabAdapter.notifyDataSetChanged()
+    }
+
+    /** 把当前画面缩成一张卡片缩略图（只对挂在前台的 WebView 画，后台页没有画面） */
+    private fun captureThumb(tab: Tab) {
+        val wv = tab.webView
+        val vw = wv.width
+        val vh = wv.height
+        if (vw == 0 || vh == 0) return
+        try {
+            val w = 270
+            val h = (270f * vh / vw).toInt().coerceIn(240, 540)
+            val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(bmp)
+            canvas.scale(w / vw.toFloat(), h / vh.toFloat())
+            wv.draw(canvas)
+            tab.thumb = bmp
+        } catch (e: Exception) {
+            Log.w(TAG, "capture thumb failed: ${e.message}")
+        }
+    }
+
+    private fun updateTabBadge() {
+        tabBadge.text = tabs.size.toString()
+    }
+
+    private fun openTabSwitcher() {
+        captureThumb(tabs[currentIndex])
+        tabAdapter.notifyDataSetChanged()
+        tabSwitcher.visibility = View.VISIBLE
+    }
+
+    private fun hideTabSwitcher() {
+        tabSwitcher.visibility = View.GONE
+    }
+
+    /** 新建标签页：弹出地址栏（右侧「访问」），回车或点访问都会跳转 */
+    private fun showAddressBar() {
+        val view = LayoutInflater.from(this).inflate(R.layout.view_address_bar, null)
+        val input = view.findViewById<EditText>(R.id.addressInput)
+        val go = view.findViewById<TextView>(R.id.goBtn)
+        input.setText(settingsManager.url.trim())
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("新建标签页")
+            .setView(view)
+            .setNegativeButton("取消", null)
+            .create()
+        fun launch() {
+            val addr = input.text.toString().trim()
+            if (addr.isEmpty()) return
+            dialog.dismiss()
+            openAddressInNewTab(addr)
+        }
+        go.setOnClickListener { launch() }
+        input.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_GO) {
+                launch()
+                true
+            } else {
+                false
+            }
+        }
+        dialog.show()
+        input.selectAll()
+    }
+
+    private fun openAddressInNewTab(raw: String) {
+        val addr = raw.trim()
+        if (addr.isEmpty()) return
+        if (tabs.size >= MAX_TABS) {
+            Toast.makeText(this, "最多打开 $MAX_TABS 个标签页", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val url = if (addr.startsWith("http://", true) || addr.startsWith("https://", true)) {
+            addr
+        } else {
+            "http://$addr"
+        }
+        val tab = addTab()   // addTab 会切到新页并关掉切换器
+        tab.iface.setSharedContent("", "none")
+        tab.webView.loadUrl(url)
+    }
+
+    private inner class TabAdapter : RecyclerView.Adapter<TabVH>() {
+
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): TabVH {
+            val view = LayoutInflater.from(parent.context)
+                .inflate(R.layout.item_tab, parent, false)
+            return TabVH(view)
+        }
+
+        override fun getItemCount(): Int = tabs.size
+
+        override fun onBindViewHolder(holder: TabVH, position: Int) {
+            val tab = tabs[position]
+            holder.title.text = tab.title.ifBlank { "新标签页" }
+            if (tab.thumb != null) {
+                holder.thumb.setImageBitmap(tab.thumb)
+            } else {
+                holder.thumb.setImageDrawable(null)
+            }
+            holder.close.setOnClickListener { closeTab(position) }
+            holder.itemView.setOnClickListener { switchTo(position) }
+        }
+    }
+
+    private class TabVH(view: View) : RecyclerView.ViewHolder(view) {
+        val title: TextView = view.findViewById(R.id.tabTitle)
+        val thumb: ImageView = view.findViewById(R.id.tabThumb)
+        val close: ImageButton = view.findViewById(R.id.tabClose)
     }
 
     private fun showNoUrlMessage() {
@@ -703,6 +933,9 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "WebShareApp"
+
+        /** 标签页上限：每个都是一个完整 WebView，内存吃不消太多 */
+        private const val MAX_TABS = 6
 
         /**
          * 注入到页面里的自动上传脚本（前面会拼上 specs 数组）。取回分享文件的字节包成 File，
