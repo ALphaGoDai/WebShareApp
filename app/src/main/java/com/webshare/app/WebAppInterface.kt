@@ -147,6 +147,26 @@ class WebAppInterface(private val context: Context) {
     @JavascriptInterface
     fun mediaCaps(): String = MediaCaps.json()
 
+    /**
+     * 语音合成（Android WebView 不实现 Web Speech API，window.speechSynthesis 整个不存在）。
+     * 注入脚本里的 speechSynthesis 补丁把 speak() 转到这里，播完/失败回调那个页面的
+     * window.__webshareTtsDone(id, err)。
+     */
+    @JavascriptInterface
+    fun ttsSpeak(text: String, lang: String, rate: Double, pitch: Double, voice: String, id: String) {
+        val wv = webViewRef ?: return
+        TtsEngine.speak(wv, text, lang, rate, pitch, voice, id)
+    }
+
+    @JavascriptInterface
+    fun ttsStop() {
+        TtsEngine.stop()
+    }
+
+    /** 可用语音列表 JSON（[{name, lang}]），页面用它挑中文声音；调用即代表本页关心 voiceschanged */
+    @JavascriptInterface
+    fun ttsVoices(): String = TtsEngine.voicesJson(webViewRef)
+
     /** 读剪贴板文本（非安全上下文里网页拿不到 navigator.clipboard，只能走桥接） */
     @JavascriptInterface
     fun readClipboard(): String {        return try {

@@ -14,6 +14,7 @@ import android.util.Log
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.webkit.PermissionRequest
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebSettings
@@ -155,6 +156,21 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+    /** 网页 getUserMedia 要麦克风（学习站点的语音跟读录音）：等运行时权限到手再回答 WebView */
+    private var pendingWebPerm: PermissionRequest? = null
+
+    private val micPermissionLauncher: ActivityResultLauncher<String> =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            val req = pendingWebPerm ?: return@registerForActivityResult
+            pendingWebPerm = null
+            if (granted) {
+                req.grant(req.resources)
+            } else {
+                Toast.makeText(this@MainActivity, "没有麦克风权限，网页无法录音", Toast.LENGTH_LONG).show()
+                req.deny()
+            }
+        }
+
     private val shimJs: String by lazy {
         try {
             assets.open("shim.js").bufferedReader().use { it.readText() }
@@ -175,6 +191,9 @@ class MainActivity : AppCompatActivity() {
         initTabs()
         setupBottomBar()
         setupBackNavigation()
+
+        // 系统 TTS：注入脚本里的 speechSynthesis 补丁靠它出声，早点初始化，页面一问就有嗓音
+        TtsEngine.init(this)
 
         settingsLauncher = registerForActivityResult(
             ActivityResultContracts.StartActivityForResult()
@@ -494,6 +513,35 @@ class MainActivity : AppCompatActivity() {
                     Toast.makeText(this@MainActivity, "无法打开文件选择器", Toast.LENGTH_SHORT).show()
                     false
                 }
+            }
+
+            /**
+             * 网页要麦克风/摄像头：WebView 把决定权交给应用，不实现就一律拒绝
+             * （学习站点的语音跟读录音走 getUserMedia，拿到的是 NotAllowedError）。
+             * 本应用只放行麦克风；摄像头要 CAMERA 权限，没申请，拒绝。
+             */
+            override fun onPermissionRequest(request: PermissionRequest?) {
+                val req = request ?: return
+                val audio = PermissionRequest.RESOURCE_AUDIO_CAPTURE
+                if (!req.resources.any { it == audio }) {
+                    req.deny()
+                    return
+                }
+                val granted = ContextCompat.checkSelfPermission(
+                    this@MainActivity, Manifest.permission.RECORD_AUDIO
+                ) == PackageManager.PERMISSION_GRANTED
+                if (granted) {
+                    req.grant(req.resources)
+                    return
+                }
+                pendingWebPerm?.deny()
+                pendingWebPerm = req
+                micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            }
+
+            /** 页面放弃/切走了：把还挂着的那次请求作废，别再弹权限 */
+            override fun onPermissionRequestCanceled(request: PermissionRequest?) {
+                if (pendingWebPerm === request) pendingWebPerm = null
             }
         }
 
@@ -818,6 +866,7 @@ class MainActivity : AppCompatActivity() {
         val wasCurrent = index == currentIndex
         val tab = tabs.removeAt(index)
         webViewContainer.removeView(tab.webView)
+        TtsEngine.forget(tab.webView)
         tab.webView.destroy()
         currentIndex = when {
             index < currentIndex -> currentIndex - 1

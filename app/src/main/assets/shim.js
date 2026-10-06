@@ -541,4 +541,256 @@
     var href = toAbs(a.getAttribute('href') || a.href);
     if (href && openExternal(href)) e.preventDefault();
   }, true);
+
+  // ---------- 语音合成：speechSynthesis 补丁 ----------
+  // Android WebView 不实现 Web Speech API（window.speechSynthesis 整个不存在），
+  // 学习类站点（轰轰爱学习等）的朗读会直接弹"浏览器不支持语音合成"。
+  // 这里把接口补齐，后端是 App 的系统 TTS（Android.ttsSpeak / ttsStop / ttsVoices）。
+  // 页面用法（cancel → setTimeout → speak、onend 串下一句、getVoices 挑中文嗓音、
+  // 首次点击播空 utterance 解锁）全部照浏览器语义支持。
+  (function installSpeech() {
+    if (!bridge.ttsSpeak) return;
+    var nativeSynth = window.speechSynthesis;
+    if (nativeSynth) {
+      // 有的 WebView 有对象却一个语音都报不出来（等于不能用）→ 照样接管；
+      // 真能报出语音的原生实现就让给它。
+      try {
+        if (nativeSynth.getVoices && nativeSynth.getVoices().length > 0) return;
+      } catch (e) { return; }
+    }
+
+    var byId = {};          // utteranceId -> utterance（App 回调时找回它）
+    var order = [];         // 待播/在播顺序
+    var seq = 0;
+    var voicesCache = [];
+    var listeners = [];
+    var pausedList = [];
+
+    function num(v, dflt) {
+      var n = Number(v);
+      return (isFinite(n) && n > 0) ? n : dflt;
+    }
+
+    function fire(u, type, extra) {
+      var ev = { type: type, target: u, currentTarget: u, timeStamp: Date.now() };
+      if (extra) for (var k in extra) ev[k] = extra[k];
+      var h = u['on' + type];
+      if (typeof h === 'function') {
+        try { h.call(u, ev); } catch (e) { console.error('speech ' + type + ' handler:', e); }
+      }
+      var list = u._wsL && u._wsL[type];
+      if (list) {
+        for (var i = 0; i < list.length; i++) {
+          try { list[i].call(u, ev); } catch (e) {}
+        }
+      }
+    }
+
+    function flags() {
+      var speaking = 0, queued = 0;
+      for (var i = 0; i < order.length; i++) {
+        if (order[i]._wsStarted) speaking++; else queued++;
+      }
+      speech.speaking = speaking > 0;
+      speech.pending = queued > 0;
+    }
+
+    function drop(u) {
+      if (u._wsId) delete byId[u._wsId];
+      var i = order.indexOf(u);
+      if (i >= 0) order.splice(i, 1);
+    }
+
+    function Utterance(text) {
+      this.text = String(text == null ? '' : text);
+      this.lang = '';
+      this.voice = null;
+      this.volume = 1;
+      this.rate = 1;
+      this.pitch = 1;
+      this.onstart = null;
+      this.onend = null;
+      this.onerror = null;
+      this.onpause = null;
+      this.onresume = null;
+      this.onmark = null;
+      this.onboundary = null;
+      this._wsId = '';
+      this._wsStarted = false;
+      this._wsL = {};
+    }
+    Utterance.prototype.addEventListener = function (type, fn) {
+      if (typeof fn !== 'function') return;
+      (this._wsL[type] = this._wsL[type] || []).push(fn);
+    };
+    Utterance.prototype.removeEventListener = function (type, fn) {
+      var a = this._wsL[type];
+      if (!a) return;
+      var i = a.indexOf(fn);
+      if (i >= 0) a.splice(i, 1);
+    };
+    Utterance.prototype.dispatchEvent = function (ev) {
+      if (ev && ev.type) fire(this, ev.type, ev);
+      return true;
+    };
+
+    // ---- 语音列表：App 侧同步返回（addJavascriptInterface 同步调用） ----
+    function refreshVoices() {
+      var raw = [];
+      try { raw = JSON.parse(bridge.ttsVoices() || '[]'); } catch (e) { raw = []; }
+      var seen = {}, out = [];
+      for (var i = 0; i < (raw || []).length; i++) {
+        var v = raw[i] || {};
+        if (!v.name) continue;
+        var key = v.name + '|' + (v.lang || '');
+        if (seen[key]) continue;
+        seen[key] = 1;
+        out.push({
+          name: v.name,
+          lang: v.lang || '',
+          localService: true,
+          'default': false,
+          voiceURI: v.name
+        });
+      }
+      voicesCache = out;
+      return out;
+    }
+
+    function getVoices() {
+      // 引擎就绪前页面来问会拿到空表（和浏览器一致）；之后每次问都重取，无需等事件
+      if (!voicesCache.length) refreshVoices();
+      return voicesCache.slice();
+    }
+
+    function emitVoices() {
+      var ev = { type: 'voiceschanged', target: speech, currentTarget: speech, timeStamp: Date.now() };
+      if (typeof speech.onvoiceschanged === 'function') {
+        try { speech.onvoiceschanged(ev); } catch (e) { console.error('voiceschanged handler:', e); }
+      }
+      for (var i = 0; i < listeners.length; i++) {
+        try { listeners[i].call(speech, ev); } catch (e) {}
+      }
+    }
+
+    // ---- 朗读 ----
+    function speak(u) {
+      if (!u || typeof u !== 'object') return;
+      u._wsStarted = false;
+      u._wsId = 'u' + (++seq);
+      byId[u._wsId] = u;
+      order.push(u);
+      flags();
+      var text = String(u.text == null ? '' : u.text);
+      // 空 utterance（移动端"解锁 TTS"的常见写法）：按浏览器行为立刻收尾，不占着队列
+      if (!text.trim()) {
+        setTimeout(function () { start(u); end(u); }, 0);
+        return;
+      }
+      var id = u._wsId;
+      setTimeout(function () { if (byId[id]) start(u); }, 0);
+      try {
+        bridge.ttsSpeak(text, u.lang || '', num(u.rate, 1), num(u.pitch, 1),
+                        (u.voice && u.voice.name) || '', id);
+      } catch (e) {
+        fail(u, 'synthesis-failed');
+      }
+    }
+
+    function start(u) {
+      if (byId[u._wsId] !== u) return;
+      u._wsStarted = true;
+      flags();
+      fire(u, 'start');
+    }
+
+    function end(u) {
+      drop(u);
+      flags();
+      fire(u, 'end');
+    }
+
+    function fail(u, reason) {
+      drop(u);
+      flags();
+      fire(u, 'error', { error: reason, message: reason });
+    }
+
+    function cancel() {
+      for (var id in byId) delete byId[id];
+      order.length = 0;
+      pausedList.length = 0;
+      speech.paused = false;
+      flags();
+      try { bridge.ttsStop(); } catch (e) {}
+    }
+
+    // Android 的系统 TTS 没有暂停/继续：先停声，恢复时从头再念（页面几乎不用这两个）
+    function pause() {
+      speech.paused = true;
+      if (!order.length) return;
+      pausedList = order.slice();
+      for (var id in byId) delete byId[id];
+      order.length = 0;
+      flags();
+      for (var i = 0; i < pausedList.length; i++) fire(pausedList[i], 'pause');
+      try { bridge.ttsStop(); } catch (e) {}
+    }
+
+    function resume() {
+      speech.paused = false;
+      if (!pausedList.length) return;
+      var list = pausedList;
+      pausedList = [];
+      for (var i = 0; i < list.length; i++) {
+        fire(list[i], 'resume');
+        speak(list[i]);
+      }
+    }
+
+    var speech = {
+      pending: false,
+      speaking: false,
+      paused: false,
+      onvoiceschanged: null,
+      speak: speak,
+      cancel: cancel,
+      pause: pause,
+      resume: resume,
+      getVoices: getVoices,
+      addEventListener: function (type, fn) {
+        if (type === 'voiceschanged' && typeof fn === 'function') listeners.push(fn);
+      },
+      removeEventListener: function (type, fn) {
+        var i = listeners.indexOf(fn);
+        if (i >= 0) listeners.splice(i, 1);
+      },
+      dispatchEvent: function (ev) {
+        if (ev && ev.type === 'voiceschanged') emitVoices();
+        return true;
+      }
+    };
+
+    // App 回调：TTS 播完/出错
+    window.__webshareTtsDone = function (id, err) {
+      var u = byId[id];
+      if (!u) return;
+      if (err) fail(u, 'synthesis-failed'); else end(u);
+    };
+    // App 回调：系统 TTS 刚就绪（之前的 getVoices 是空的），页面该重新挑嗓音了
+    window.__webshareTtsVoices = function () {
+      refreshVoices();
+      emitVoices();
+    };
+
+    window.SpeechSynthesisUtterance = Utterance;
+    try {
+      Object.defineProperty(window, 'speechSynthesis', {
+        value: speech, configurable: true, writable: false
+      });
+    } catch (e) {
+      window.speechSynthesis = speech;
+    }
+    refreshVoices();
+  })();
 })();
