@@ -13,6 +13,7 @@
 - **文件上传**：网页 `<input type="file">` 可用，带文件的表单由 App 流式组装上传
 - **新窗口链接交给系统浏览器**：`window.open` / `target="_blank"` 不再顶掉挂载的页面
 - **网页视频能播就读得动**：把设备真实的解码能力（有没有 H.265 硬解）如实告诉网页，并把时间轴损坏的录像在播放前自动修好
+- **语音朗读与录音**（v1.0.31 起）：网页的 `speechSynthesis` 朗读由 App 的系统 TTS 顶上（Android WebView 自己不带），`getUserMedia` 录音（学习站点的语音跟读）在 https 页面放行麦克风
 - **安全 DNS (DoH)**：支持 DNS-over-HTTPS，可自定义 DoH 服务器，防止 DNS 劫持
 - **JavaScript 接口**：网页可通过 JavaScript 获取分享内容、剪贴板、网络桥接
 
@@ -282,6 +283,30 @@ App 的三种处理：
 所以「分享完自动保存」只能由 App 把文件送进页面的输入框。文件全程流式读取，不复制、不改名、
 不进内存；读相册文件要权限——Android 13+ 是「照片和视频」（`READ_MEDIA_IMAGES/VIDEO/AUDIO`），
 更早版本是存储权限，第一次分享时申请一次。
+
+### 方式 L：语音朗读与录音（v1.0.31 起）
+
+Android 的 WebView 不实现 Web Speech API（`window.speechSynthesis` 整个不存在），学习类站点
+（轰轰爱学习等）的朗读只能弹「浏览器不支持语音合成」；网页录音用的 `getUserMedia` 又只在
+**安全上下文**（https）里才暴露，站点里的语音跟读一直点不动。两件事现在都由 App 补齐：
+
+**① 语音合成（朗读）**——注入脚本用 App 的系统 TTS 补齐 `speechSynthesis` /
+`SpeechSynthesisUtterance`，语义照浏览器来：
+
+- `speak()` / `cancel()` 转给系统 TTS，播完/出错回调页面的 `onend` / `onerror`；
+  「一句念完接下一句」的链式朗读、`cancel()` 之后旧句不再回调，都按浏览器行为实现；
+- `getVoices()` 列出系统 TTS 引擎的嗓音（普通话统一标成 `zh-CN`，页面按 `zh` 挑嗓音挑得中）；
+  引擎刚就绪时补发一次 `voiceschanged`（不会和 `getVoices()` 转圈）；
+- 空 utterance（手机端「解锁 TTS」的常见写法）当场收尾，不占队列；
+- 系统 TTS 没有中文数据时回 `error`，页面可以走自己的降级（预录音 MP3 等），而不是静默无声。
+
+朗读用的是手机的系统 TTS 引擎（设置 → 无障碍 / 语言和输入 → 文字转语音输出），要换嗓音在那里装/选。
+
+**② 录音（语音跟读）**——WebView 侧放行麦克风：`onPermissionRequest` + `RECORD_AUDIO` 运行时权限，
+第一次录音时系统弹「仅在使用该应用时允许」。但 Chromium 只在安全上下文里把麦克风交给网页，
+**`http://` 局域网地址下网页拿不到麦克风**（页面一般提示「不支持录音功能」），要用 https 地址打开。
+以轰轰爱学习为例：`http://192.168.31.76:8010` 只能朗读、不能跟读；
+`https://hanzi.nbhonghong.top:7777`（Lucky 反代 + 泛域名证书）朗读、跟读都能用。
 
 ### 3. 配置安全 DNS (DoH)
 
