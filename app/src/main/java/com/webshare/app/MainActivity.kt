@@ -23,6 +23,7 @@ import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageButton
 import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
@@ -609,6 +610,7 @@ class MainActivity : AppCompatActivity() {
                     tab.title = view?.title?.takeIf { it.isNotBlank() } ?: tab.title
                     tab.url = url ?: tab.url
                     persistTabs()
+                    url?.let { AddressHistory.record(this@MainActivity, withoutSharedParam(it)) }
                 }
                 if (currentSharedText != null) {
                     val js = buildString {
@@ -764,12 +766,19 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun reloadWebView() {
-        // 设置改动（网址/DoH）对每个标签页生效：重建 client、刷新桥接参数；当前页重新加载
+        // 设置改动（DoH 等）对每个标签页生效：重建 client、刷新桥接参数；当前页只重载它自己的地址
+        // （设置里已经没有网址项了，别再把当前页拽回设置里的默认地址）
         for (tab in tabs) {
             tab.webView.webViewClient = createWebViewClient()
             tab.iface.attach(tab.webView, settingsManager.dohEnabled, settingsManager.dohUrl)
         }
-        loadUrl(force = true)
+        val cur = tabs.getOrNull(currentIndex) ?: return
+        val curUrl = cur.webView.url
+        if (curUrl != null && curUrl != "about:blank") {
+            cur.webView.reload()
+        } else {
+            loadUrl(force = true)
+        }
     }
 
     // ---------- 多标签页 ----------
@@ -900,11 +909,12 @@ class MainActivity : AppCompatActivity() {
         tabSwitcher.visibility = View.GONE
     }
 
-    /** 新建标签页：弹出地址栏（右侧「访问」），回车或点访问都会跳转 */
+    /** 新建标签页：弹出地址栏（右侧「访问」），回车或点访问都会跳转；下方列最近访问过的 5 个地址 */
     private fun showAddressBar() {
         val view = LayoutInflater.from(this).inflate(R.layout.view_address_bar, null)
         val input = view.findViewById<EditText>(R.id.addressInput)
         val go = view.findViewById<TextView>(R.id.goBtn)
+        val historyBox = view.findViewById<LinearLayout>(R.id.historyList)
         input.setText(settingsManager.url.trim())
         val dialog = AlertDialog.Builder(this)
             .setTitle("新建标签页")
@@ -917,6 +927,51 @@ class MainActivity : AppCompatActivity() {
             dialog.dismiss()
             openAddressInNewTab(addr)
         }
+        fun refreshHistory() {
+            historyBox.removeAllViews()
+            val items = AddressHistory.recent(this, 5)
+            if (items.isEmpty()) {
+                historyBox.visibility = View.GONE
+                return
+            }
+            historyBox.visibility = View.VISIBLE
+            val pad = (12 * resources.displayMetrics.density).toInt()
+            for (addr in items) {
+                val row = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = android.view.Gravity.CENTER_VERTICAL
+                }
+                val tv = TextView(this).apply {
+                    text = addr
+                    textSize = 14f
+                    maxLines = 1
+                    ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
+                    setPadding(0, pad, 0, pad)
+                    background = selectableBackground()
+                    setOnClickListener { dialog.dismiss(); openAddressInNewTab(addr) }
+                }
+                val del = ImageButton(this).apply {
+                    setImageResource(R.drawable.ic_nav_close)
+                    background = selectableBackgroundBorderless()
+                    alpha = 0.55f
+                    contentDescription = "删除该记录"
+                    setOnClickListener {
+                        AddressHistory.remove(this@MainActivity, addr)
+                        refreshHistory()
+                    }
+                }
+                row.addView(tv, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                row.addView(
+                    del,
+                    LinearLayout.LayoutParams(
+                        (30 * resources.displayMetrics.density).toInt(),
+                        (30 * resources.displayMetrics.density).toInt()
+                    )
+                )
+                historyBox.addView(row)
+            }
+        }
+        refreshHistory()
         go.setOnClickListener { launch() }
         input.setOnEditorActionListener { _, actionId, _ ->
             if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_GO) {
@@ -929,6 +984,17 @@ class MainActivity : AppCompatActivity() {
         dialog.show()
         input.selectAll()
     }
+
+    /** 取主题里的触摸反馈背景（attr 不能直接 setBackgroundResource，得先解析成 drawable） */
+    private fun selectableBackground(): android.graphics.drawable.Drawable? =
+        obtainStyledAttributes(intArrayOf(android.R.attr.selectableItemBackground)).let { a ->
+            try { a.getDrawable(0) } finally { a.recycle() }
+        }
+
+    private fun selectableBackgroundBorderless(): android.graphics.drawable.Drawable? =
+        obtainStyledAttributes(intArrayOf(android.R.attr.selectableItemBackgroundBorderless)).let { a ->
+            try { a.getDrawable(0) } finally { a.recycle() }
+        }
 
     private fun openAddressInNewTab(raw: String) {
         val addr = raw.trim()

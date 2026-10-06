@@ -9,8 +9,12 @@ class SettingsManager(context: Context) {
         migrateSettings()
     }
 
+    /**
+     * 默认打开的网页地址。设置页已不再提供这一项（地址都从「新建标签页」的地址栏输），
+     * 这个值只在冷启动没有可恢复的标签页时作为起始页/新标签页预填用。
+     */
     var url: String
-        get() = prefs.getString(KEY_URL, "") ?: ""
+        get() = prefs.getString(KEY_URL, DEFAULT_URL) ?: DEFAULT_URL
         set(value) = prefs.edit().putString(KEY_URL, value).apply()
 
     var dohEnabled: Boolean
@@ -45,6 +49,7 @@ class SettingsManager(context: Context) {
         private const val KEY_DOH_URL = "doh_url"
         private const val KEY_SETTINGS_VERSION = "settings_version"
         private const val KEY_UPDATE_URL = "update_url"
+        const val DEFAULT_URL = "http://send.nbhonghong.top:7777/"
         const val DEFAULT_DOH_URL = "https://doh.pub/dns-query"
         const val DEFAULT_UPDATE_URL =
             "https://github.com/ALphaGoDai/WebShareApp/releases/latest/download/WebShareApp.apk"

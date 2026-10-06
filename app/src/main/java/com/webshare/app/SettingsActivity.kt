@@ -18,7 +18,6 @@ import com.google.android.material.textfield.TextInputEditText
 class SettingsActivity : AppCompatActivity() {
 
     private lateinit var settingsManager: SettingsManager
-    private lateinit var etUrl: TextInputEditText
     private lateinit var switchDoh: Switch
     private lateinit var etDohUrl: TextInputEditText
     private lateinit var layoutDohUrl: View
@@ -35,7 +34,6 @@ class SettingsActivity : AppCompatActivity() {
 
         settingsManager = SettingsManager(this)
 
-        etUrl = findViewById(R.id.etUrl)
         switchDoh = findViewById(R.id.switchDoh)
         etDohUrl = findViewById(R.id.etDohUrl)
         layoutDohUrl = findViewById(R.id.layoutDohUrl)
@@ -49,7 +47,6 @@ class SettingsActivity : AppCompatActivity() {
             finish()
         }
 
-        etUrl.setText(settingsManager.url)
         switchDoh.isChecked = settingsManager.dohEnabled
         etDohUrl.setText(settingsManager.dohUrl)
         etUpdateUrl.setText(settingsManager.updateUrl)
@@ -87,14 +84,9 @@ class SettingsActivity : AppCompatActivity() {
         }
 
         btnSave.setOnClickListener {
-            var url = etUrl.text?.toString()?.trim() ?: ""
             val dohEnabled = switchDoh.isChecked
             val dohUrl = etDohUrl.text?.toString()?.trim() ?: ""
             val updateUrl = etUpdateUrl.text?.toString()?.trim() ?: ""
-
-            if (url.isNotEmpty() && !url.startsWith("http://") && !url.startsWith("https://")) {
-                url = "http://$url"
-            }
 
             if (dohEnabled && dohUrl.isNotEmpty()) {
                 val isDoh = dohUrl.startsWith("https://")
@@ -105,7 +97,6 @@ class SettingsActivity : AppCompatActivity() {
                 }
             }
 
-            settingsManager.url = url
             settingsManager.dohEnabled = dohEnabled
             settingsManager.dohUrl = if (dohUrl.isEmpty()) SettingsManager.DEFAULT_DOH_URL else dohUrl
             settingsManager.updateUrl = if (updateUrl.isEmpty()) SettingsManager.DEFAULT_UPDATE_URL else updateUrl
@@ -144,9 +135,9 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     private fun runDiagnostics() {
-        val targetUrl = etUrl.text?.toString()?.trim() ?: ""
+        val targetUrl = settingsManager.url.trim()
         if (targetUrl.isEmpty()) {
-            Snackbar.make(btnDiagnose, "请先填写网页地址", Snackbar.LENGTH_LONG).show()
+            Snackbar.make(btnDiagnose, "没有可诊断的网页地址", Snackbar.LENGTH_LONG).show()
             return
         }
 
