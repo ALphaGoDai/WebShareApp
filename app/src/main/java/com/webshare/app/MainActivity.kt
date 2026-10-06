@@ -52,7 +52,10 @@ class MainActivity : AppCompatActivity() {
         var title: String,
         var url: String?,
         var thumb: Bitmap?
-    )
+    ) {
+        /** 恢复出来的后台页第一次切过去才真正加载（也避免开 App 就并发拉满 6 个页面） */
+        var pendingUrl: String? = null
+    }
 
     private val tabs = mutableListOf<Tab>()
     private var currentIndex = -1
@@ -187,6 +190,11 @@ class MainActivity : AppCompatActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         handleIntent(intent)
+    }
+
+    override fun onStop() {
+        super.onStop()
+        persistTabs()   // 退到后台先把标签页记下来，进程随后被杀也能照这份恢复
     }
 
     private fun handleIntent(intent: Intent?) {
@@ -341,12 +349,27 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** 首个标签页 + 切换器网格 */
+    /** 首个标签页 + 切换器网格；有落盘的上次标签页就照它恢复（进程被杀/划掉重开时标签页还在） */
     private fun initTabs() {
         tabGrid.layoutManager = GridLayoutManager(this, 2)
         tabGrid.adapter = tabAdapter
         findViewById<View>(R.id.btnNewTab).setOnClickListener { showAddressBar() }
-        addTab()
+
+        val saved = TabStore.load(this)
+        if (saved == null) {
+            addTab()
+            return
+        }
+        for (s in saved.tabs) {
+            val iface = WebAppInterface(this)
+            val wv = WebView(this)
+            configureWebView(wv, iface)
+            val tab = Tab(iface, wv, s.title.ifBlank { getString(R.string.app_name) }, s.url, null)
+            tab.pendingUrl = s.url
+            tabs.add(tab)
+        }
+        currentIndex = saved.current
+        switchTo(currentIndex)   // 当前页立即按恢复的地址加载，后台页等第一次切过去再加载
     }
 
     /** 新建一个标签页（建好即成为当前页）；起始地址由调用方决定 */
@@ -585,6 +608,7 @@ class MainActivity : AppCompatActivity() {
                 tabs.firstOrNull { it.webView === view }?.let { tab ->
                     tab.title = view?.title?.takeIf { it.isNotBlank() } ?: tab.title
                     tab.url = url ?: tab.url
+                    persistTabs()
                 }
                 if (currentSharedText != null) {
                     val js = buildString {
@@ -684,12 +708,16 @@ class MainActivity : AppCompatActivity() {
         })
     }
 
-    private fun loadUrl() {
+    private fun loadUrl(force: Boolean = false) {
         val baseUrl = settingsManager.url.trim()
         if (baseUrl.isEmpty()) {
             showNoUrlMessage()
             return
         }
+
+        // 每次冷启动 handleIntent 都会走到这里：恢复出来的标签页已有自己的地址，
+        // 别被设置里的网址冲掉（带分享内容的例外——那本来就是要替换当前页的）
+        if (!force && currentSharedText == null && currentTabHasOwnUrl()) return
 
         webAppInterface.setSharedContent(currentSharedText ?: "", currentSharedType)
 
@@ -703,6 +731,12 @@ class MainActivity : AppCompatActivity() {
         (webView.webViewClient as? DohWebViewClient)?.sharedFiles = currentSharedFiles
 
         webView.loadUrl(finalUrl)
+    }
+
+    /** 当前标签页有没有自己的地址（有就说明不是等待首次加载的空标签页） */
+    private fun currentTabHasOwnUrl(): Boolean {
+        val tab = tabs.getOrNull(currentIndex) ?: return false
+        return tab.url != null || tab.pendingUrl != null || tab.webView.url != null
     }
 
     /** 读回注入脚本的结果：走通就轻描一句，没走通提醒用户手动点页面的上传入口 */
@@ -735,7 +769,7 @@ class MainActivity : AppCompatActivity() {
             tab.webView.webViewClient = createWebViewClient()
             tab.iface.attach(tab.webView, settingsManager.dohEnabled, settingsManager.dohUrl)
         }
-        loadUrl()
+        loadUrl(force = true)
     }
 
     // ---------- 多标签页 ----------
@@ -746,7 +780,12 @@ class MainActivity : AppCompatActivity() {
             captureThumb(tabs[currentIndex])
         }
         currentIndex = index
-        val wv = tabs[index].webView
+        val tab = tabs[index]
+        tab.pendingUrl?.let {
+            tab.webView.loadUrl(it)
+            tab.pendingUrl = null
+        }
+        val wv = tab.webView
         if (wv.parent !== webViewContainer) {
             webViewContainer.removeAllViews()
             webViewContainer.addView(
@@ -758,12 +797,13 @@ class MainActivity : AppCompatActivity() {
         }
         updateTabBadge()
         hideTabSwitcher()
+        persistTabs()
     }
 
     private fun closeTab(index: Int) {
         if (index !in tabs.indices) return
         if (tabs.size == 1) {
-            // 最后一个标签页：关掉就退出应用
+            // 最后一个标签页：关掉就退出应用（onStop 里按 isFinishing 清掉落盘记录，下次开是干净的新标签页）
             finish()
             return
         }
@@ -788,6 +828,43 @@ class MainActivity : AppCompatActivity() {
         }
         updateTabBadge()
         tabAdapter.notifyDataSetChanged()
+        persistTabs()
+    }
+
+    /** 把当前标签页列表写进落盘存储；进程被杀后靠它恢复 */
+    private fun persistTabs() {
+        if (isFinishing) {
+            // 用户主动退出（关掉最后一个标签页 / 返回键退出）：下次开是干净的新标签页
+            TabStore.clear(this)
+            return
+        }
+        val current = tabs.getOrNull(currentIndex)
+        if (current == null || (current.url ?: current.pendingUrl) == null) {
+            // 当前页还没地址（刚建的空页/设置里没配网址）：先别覆盖旧记录，等页面起来再写
+            return
+        }
+        val saved = mutableListOf<TabStore.SavedTab>()
+        var savedCurrent = -1
+        for ((i, tab) in tabs.withIndex()) {
+            val raw = tab.url ?: tab.pendingUrl ?: continue
+            if (i == currentIndex) savedCurrent = saved.size
+            saved.add(TabStore.SavedTab(withoutSharedParam(raw), tab.title))
+        }
+        if (saved.isNotEmpty() && savedCurrent >= 0) {
+            TabStore.save(this, saved, savedCurrent)
+        }
+    }
+
+    /** ?shared= 是分享时的一次性交接参数（对应的文件登记不跨进程），恢复时带着只会让页面拿到空内容 */
+    private fun withoutSharedParam(url: String): String {
+        val qIdx = url.indexOf('?')
+        if (qIdx < 0) return url
+        val fragIdx = url.indexOf('#').let { if (it >= 0) it else url.length }
+        val kept = url.substring(qIdx + 1, fragIdx)
+            .split('&')
+            .filter { it.substringBefore('=').trim() != "shared" }
+        val head = if (kept.isEmpty()) url.substring(0, qIdx) else url.substring(0, qIdx + 1) + kept.joinToString("&")
+        return head + url.substring(fragIdx)
     }
 
     /** 把当前画面缩成一张卡片缩略图（只对挂在前台的 WebView 画，后台页没有画面） */
@@ -866,6 +943,7 @@ class MainActivity : AppCompatActivity() {
             "http://$addr"
         }
         val tab = addTab()   // addTab 会切到新页并关掉切换器
+        tab.url = url        // 先记下地址再加载：页面还没加载完进程就被杀也能恢复出来
         tab.iface.setSharedContent("", "none")
         tab.webView.loadUrl(url)
     }
