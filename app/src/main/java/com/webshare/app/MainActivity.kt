@@ -610,7 +610,6 @@ class MainActivity : AppCompatActivity() {
                     tab.title = view?.title?.takeIf { it.isNotBlank() } ?: tab.title
                     tab.url = url ?: tab.url
                     persistTabs()
-                    url?.let { AddressHistory.record(this@MainActivity, withoutSharedParam(it)) }
                 }
                 if (currentSharedText != null) {
                     val js = buildString {
@@ -1012,6 +1011,8 @@ class MainActivity : AppCompatActivity() {
         tab.url = url        // 先记下地址再加载：页面还没加载完进程就被杀也能恢复出来
         tab.iface.setSharedContent("", "none")
         tab.webView.loadUrl(url)
+        // 历史只记「从地址栏输入并发起」的地址，网页里随便点的不算
+        AddressHistory.record(this, withoutSharedParam(url))
     }
 
     private inner class TabAdapter : RecyclerView.Adapter<TabVH>() {
