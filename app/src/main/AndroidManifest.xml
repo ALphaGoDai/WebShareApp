@@ -19,6 +19,16 @@
         android:name="android.hardware.microphone"
         android:required="false" />
 
+    <!-- Android 11+ 的包可见性：不声明这一条，targetSdk≥30 的应用看不见任何 TTS 引擎
+         （TextToSpeech 初始化拿不到引擎、voices 为空、朗读全部静默失败），
+         而普通 mp3 播放不受影响——表现就是"组词/造句没声音，别的都有"。
+         改动时务必保留。 -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
+    </queries>
+
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"

@@ -300,6 +300,12 @@ Android 的 WebView 不实现 Web Speech API（`window.speechSynthesis` 整个�
 - 空 utterance（手机端「解锁 TTS」的常见写法）当场收尾，不占队列；
 - 系统 TTS 没有中文数据时回 `error`，页面可以走自己的降级（预录音 MP3 等），而不是静默无声。
 
+清单里那条 `<queries><intent><action android:name="android.intent.action.TTS_SERVICE" /></intent></queries>`
+不能删：Android 11 起（targetSdk ≥ 30）有包可见性限制，不声明就看不见任何 TTS 引擎，
+`TextToSpeech` 初始化直接返回 ERROR、`getVoices()` 为空、所有朗读静默失败，而网页里的 MP3 播放
+完全不受影响——症状就是「组词、造句没声音，点汉字本身有声音」。排查用 `adb logcat -s WebShareApp`
+看 `TTS init status=...`（`status=0` 才算拿到引擎）。
+
 朗读用的是手机的系统 TTS 引擎（设置 → 无障碍 / 语言和输入 → 文字转语音输出），要换嗓音在那里装/选。
 
 **② 录音（语音跟读）**——WebView 侧放行麦克风：`onPermissionRequest` + `RECORD_AUDIO` 运行时权限，

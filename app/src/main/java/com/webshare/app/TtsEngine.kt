@@ -5,6 +5,7 @@ import android.os.Handler
 import android.os.Looper
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import android.util.Log
 import android.webkit.WebView
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
@@ -48,6 +49,7 @@ object TtsEngine {
         tts = TextToSpeech(context.applicationContext) { status ->
             ready = status == TextToSpeech.SUCCESS
             failed = !ready
+            Log.i(TAG, "TTS init status=$status ready=$ready voices=${tts?.voices?.size ?: -1}")
             if (ready) notifyVoicesChanged()
             mainHandler.post {
                 val todo = pending.toList()
@@ -87,6 +89,7 @@ object TtsEngine {
 
     private fun finish(id: String, err: Boolean) {
         val wv = live.remove(id) ?: return
+        Log.i(TAG, "TTS finish id=$id err=$err")
         mainHandler.post {
             try {
                 wv.evaluateJavascript(
@@ -181,6 +184,7 @@ object TtsEngine {
                 val langRes = engine.setLanguage(localeFor(lang))
                 if (langRes == TextToSpeech.LANG_MISSING_DATA || langRes == TextToSpeech.LANG_NOT_SUPPORTED) {
                     // 系统 TTS 没有中文数据：让页面收到 error 走它的降级链，而不是静默无声
+                    Log.w(TAG, "TTS 语言不支持 lang=$lang res=$langRes")
                     finish(id, true)
                     return@post
                 }
@@ -189,8 +193,10 @@ object TtsEngine {
                 engine.setSpeechRate(rate.coerceIn(0.3, 3.0).toFloat())
                 engine.setPitch(pitch.coerceIn(0.3, 2.0).toFloat())
                 val res = engine.speak(text, TextToSpeech.QUEUE_ADD, null, id)
+                Log.i(TAG, "TTS speak id=$id len=${text.length} langRes=$langRes voice=${voice.ifEmpty { "-" }} res=$res")
                 if (res != TextToSpeech.SUCCESS) finish(id, true)
             } catch (e: Exception) {
+                Log.w(TAG, "TTS speak 异常 id=$id", e)
                 finish(id, true)
             }
         }
@@ -215,4 +221,6 @@ object TtsEngine {
             }
         }
     }
+
+    private const val TAG = "WebShareApp"
 }
