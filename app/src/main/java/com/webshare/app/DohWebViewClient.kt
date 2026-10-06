@@ -208,6 +208,8 @@ open class DohWebViewClient(
             try {
                 return maybeInjectShim(fetchWithOkHttp(urlStr, headers), isMainFrame)
             } catch (e: Exception) {
+                // 连不上/超时这类链路问题，换 TLS 原始通道也一样连不上：直接失败，别多等一轮
+                if (isTransportFailure(e)) throw e
                 // OkHttp is strict about response parsing; retry over a raw
                 // TLS socket with the lenient parser.
                 try {
@@ -235,6 +237,7 @@ open class DohWebViewClient(
         return try {
             maybeInjectShim(fetchWithRawSocket(urlStr, headers), isMainFrame)
         } catch (e: Exception) {
+            if (isTransportFailure(e)) throw e
             // Some servers only accept TLS even on non-standard ports
             val resp = maybeInjectShim(fetchWithTlsRawSocket(toHttps(urlStr), headers), isMainFrame)
             tlsOnlyHosts[host] = true

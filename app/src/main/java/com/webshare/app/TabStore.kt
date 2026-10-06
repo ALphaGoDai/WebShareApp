@@ -18,14 +18,16 @@ object TabStore {
     private const val PREFS = "webshare_tabs"
     private const val KEY = "state"
 
-    fun save(context: Context, tabs: List<SavedTab>, current: Int) {
+    fun save(context: Context, tabs: List<SavedTab>, current: Int, commit: Boolean = false) {
         val arr = JSONArray()
         for (t in tabs) {
             arr.put(JSONObject().put("u", t.url).put("t", t.title))
         }
         val json = JSONObject().put("current", current).put("tabs", arr).toString()
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .edit().putString(KEY, json).apply()
+        val edit = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit().putString(KEY, json)
+        // 退到后台这类"写完就可能被杀"的场合用 commit：apply 的异步落盘会随进程一起消失
+        if (commit) edit.commit() else edit.apply()
     }
 
     fun load(context: Context): SavedState? {

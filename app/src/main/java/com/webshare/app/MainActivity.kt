@@ -9,6 +9,7 @@ import android.graphics.Canvas
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.provider.OpenableColumns
 import android.util.Log
 import android.view.LayoutInflater
@@ -36,6 +37,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import java.net.URL
 import java.util.UUID
 
 class MainActivity : AppCompatActivity() {
@@ -82,6 +84,18 @@ class MainActivity : AppCompatActivity() {
     private var pendingAutoUploadJs: String? = null
 
     private var settingsLauncher: ActivityResultLauncher<Intent>? = null
+
+    /** 用户主动关掉最后一个标签页（=有意识地"清空"）：只有这一种退出才抹掉落盘的标签页 */
+    private var clearTabsOnExit = false
+
+    /** 刚从我们自己的页面回来（设置/已下载/选文件）的时刻：别把这次返回当成"回到前台"去刷新 */
+    private var ownUiLaunchedAt = 0L
+
+    /** 上一次退到后台的时刻 */
+    private var lastStoppedAt = 0L
+
+    /** 冷启动那次已经在 initTabs 里加载过了，不用再"回前台刷新" */
+    private var firstStartSeen = false
 
     /** 网页里 <input type="file"> 触发的选择回调，选中后必须回填 */
     private var fileChooserCallback: ValueCallback<Array<Uri>>? = null
@@ -214,7 +228,46 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStop() {
         super.onStop()
-        persistTabs()   // 退到后台先把标签页记下来，进程随后被杀也能照这份恢复
+        lastStoppedAt = SystemClock.elapsedRealtime()
+        persistTabs(commit = true)   // 退到后台先把标签页记下来（同步落盘，进程随后被杀也带得走）
+    }
+
+    override fun onStart() {
+        super.onStart()
+        maybeRefreshStartPage()
+    }
+
+    /**
+     * 回到前台时把"起始页"重新拉一遍：进程还活着的话 WebView 里还是上次那份 DOM
+     * （站点首页那种列表看着就是旧的），重新加载才看得到新内容。
+     * 只刷新起始页这一个站点的标签页——别的页面（日历表单、学习卡片）可能正填着一半，不能动。
+     */
+    private fun maybeRefreshStartPage() {
+        if (!firstStartSeen) {
+            firstStartSeen = true          // 冷启动：initTabs 已经把当前页加载起来了
+            return
+        }
+        val own = ownUiLaunchedAt
+        ownUiLaunchedAt = 0L
+        if (own != 0L && SystemClock.elapsedRealtime() - own < 60_000) return   // 刚从自己的页面回来
+        if (SystemClock.elapsedRealtime() - lastStoppedAt < REFRESH_ON_RESUME_AFTER_MS) return
+        val tab = tabs.getOrNull(currentIndex) ?: return
+        val url = tab.webView.url ?: tab.url ?: return
+        if (!isStartPage(url)) return
+        Log.i(TAG, "回到前台，刷新起始页 $url")
+        tab.webView.reload()
+    }
+
+    /** 这个地址是不是设置里那个起始站点的页面（同一主机就算，含它下面的子页面） */
+    private fun isStartPage(url: String): Boolean {
+        val start = try { URL(settingsManager.url.trim()) } catch (e: Exception) { return false }
+        val u = try { URL(url) } catch (e: Exception) { return false }
+        return !start.host.isNullOrEmpty() && start.host.equals(u.host, ignoreCase = true)
+    }
+
+    /** 记一笔"接下来离开前台是去我们自己的页面"，别在回来时刷新 */
+    private fun markOwnUi() {
+        ownUiLaunchedAt = SystemClock.elapsedRealtime()
     }
 
     private fun handleIntent(intent: Intent?) {
@@ -506,6 +559,7 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 return try {
+                    markOwnUi()
                     filePickerLauncher.launch(Intent.createChooser(intent, "选择文件"))
                     true
                 } catch (e: Exception) {
@@ -589,6 +643,7 @@ class MainActivity : AppCompatActivity() {
             onChooseOther = {
                 pendingDownload = request
                 try {
+                    markOwnUi()
                     dirPickerLauncher.launch(null)
                 } catch (e: Exception) {
                     pendingDownload = null
@@ -727,10 +782,12 @@ class MainActivity : AppCompatActivity() {
         }
 
         findViewById<View>(R.id.navSettings).setOnClickListener {
+            markOwnUi()
             settingsLauncher?.launch(Intent(this, SettingsActivity::class.java))
         }
 
         findViewById<View>(R.id.navDownloads).setOnClickListener {
+            markOwnUi()
             startActivity(Intent(this, DownloadsActivity::class.java))
         }
 
@@ -859,7 +916,8 @@ class MainActivity : AppCompatActivity() {
     private fun closeTab(index: Int) {
         if (index !in tabs.indices) return
         if (tabs.size == 1) {
-            // 最后一个标签页：关掉就退出应用（onStop 里按 isFinishing 清掉落盘记录，下次开是干净的新标签页）
+            // 最后一个标签页：关掉就退出应用，并明确清掉落盘记录（下次开是干净的新标签页）
+            clearTabsOnExit = true
             finish()
             return
         }
@@ -889,9 +947,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** 把当前标签页列表写进落盘存储；进程被杀后靠它恢复 */
-    private fun persistTabs() {
-        if (isFinishing) {
-            // 用户主动退出（关掉最后一个标签页 / 返回键退出）：下次开是干净的新标签页
+    private fun persistTabs(commit: Boolean = false) {
+        if (clearTabsOnExit) {
+            // 用户自己关掉了最后一个标签页（就是明确要清空）：下次开是干净的新标签页。
+            // 返回键退出、从最近任务划掉、被系统回收都不清——那几种情况用户要的是"我的页面还在"
             TabStore.clear(this)
             return
         }
@@ -908,7 +967,7 @@ class MainActivity : AppCompatActivity() {
             saved.add(TabStore.SavedTab(withoutSharedParam(raw), tab.title))
         }
         if (saved.isNotEmpty() && savedCurrent >= 0) {
-            TabStore.save(this, saved, savedCurrent)
+            TabStore.save(this, saved, savedCurrent, commit)
         }
     }
 
@@ -1130,6 +1189,9 @@ class MainActivity : AppCompatActivity() {
 
         /** 标签页上限：每个都是一个完整 WebView，内存吃不消太多 */
         private const val MAX_TABS = 6
+
+        /** 退到后台超过这么久再回来，就把起始页重新拉一遍（几秒内的快速来回不折腾） */
+        private const val REFRESH_ON_RESUME_AFTER_MS = 3_000L
 
         /**
          * 注入到页面里的自动上传脚本（前面会拼上 specs 数组）。取回分享文件的字节包成 File，

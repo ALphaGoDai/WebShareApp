@@ -6,9 +6,13 @@ import java.io.BufferedInputStream
 import java.io.Closeable
 import java.io.IOException
 import java.io.InputStream
+import java.net.ConnectException
 import java.net.InetSocketAddress
+import java.net.NoRouteToHostException
 import java.net.Socket
+import java.net.SocketTimeoutException
 import java.net.URL
+import java.net.UnknownHostException
 import java.util.concurrent.TimeUnit
 import javax.net.ssl.HttpsURLConnection
 import javax.net.ssl.SNIHostName
@@ -62,6 +66,9 @@ class HttpEngine(
             return openWithOkHttp(urlStr, extraHeaders)
         } catch (e: Exception) {
             lastError = e
+            // 连不上/超时/域名解析不了是"链路层"的事，换 raw socket 一样连不上；
+            // 再试一轮只会让用户多等一个超时（服务器宕机时最明显）。协议/证书类问题才值得重试。
+            if (isTransportFailure(e)) throw e
         }
 
         // 宽松解析通道（原始 Socket）
@@ -348,4 +355,20 @@ class HttpEngine(
             "Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 " +
                 "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
     }
+}
+
+/**
+ * 链路层失败（连不上/超时/解析不了域名）：换实现重试没有意义，只会让用户多等一个超时。
+ * 协议/证书/解析异常不属于这一类——那些正是"宽松通道"要救的。
+ */
+internal fun isTransportFailure(e: Throwable): Boolean {
+    var c: Throwable? = e
+    for (i in 0 until 5) {
+        when (c) {
+            is SocketTimeoutException, is ConnectException,
+            is UnknownHostException, is NoRouteToHostException -> return true
+            else -> c = c?.cause
+        }
+    }
+    return false
 }
