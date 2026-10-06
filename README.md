@@ -298,7 +298,9 @@ Android 的 WebView 不实现 Web Speech API（`window.speechSynthesis` 整个�
 - `getVoices()` 列出系统 TTS 引擎的嗓音（普通话统一标成 `zh-CN`，页面按 `zh` 挑嗓音挑得中）；
   引擎刚就绪时补发一次 `voiceschanged`（不会和 `getVoices()` 转圈）；
 - 空 utterance（手机端「解锁 TTS」的常见写法）当场收尾，不占队列；
-- 系统 TTS 没有中文数据时回 `error`，页面可以走自己的降级（预录音 MP3 等），而不是静默无声。
+- 系统 TTS 没有中文数据时回 `error`，页面可以走自己的降级（预录音 MP3 等），而不是静默无声；
+  这时 App 还会弹一次提示（「朗读失败：…… 请到 设置 → 无障碍 → 文字转语音 里检查」），
+  告诉用户该去哪儿装引擎或中文语音，而不是让人对着没声音的按钮猜。
 
 清单里那条 `<queries><intent><action android:name="android.intent.action.TTS_SERVICE" /></intent></queries>`
 不能删：Android 11 起（targetSdk ≥ 30）有包可见性限制，不声明就看不见任何 TTS 引擎，

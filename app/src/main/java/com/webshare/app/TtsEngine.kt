@@ -7,6 +7,7 @@ import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.util.Log
 import android.webkit.WebView
+import android.widget.Toast
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
@@ -31,6 +32,12 @@ object TtsEngine {
     /** 引擎初始化完成前到达的朗读请求，就绪后按序补播 */
     private val pending = CopyOnWriteArrayList<() -> Unit>()
 
+    private var appContext: Context? = null
+
+    /** 朗读因为「没有引擎/没有中文数据」失败时，已经提示过用户一次 */
+    @Volatile
+    private var warned = false
+
     /** 进行中的朗读：utteranceId -> 发起它的页面（onDone/onError/onStop 时回调那个页面） */
     private val live = ConcurrentHashMap<String, WebView>()
 
@@ -46,6 +53,7 @@ object TtsEngine {
 
     fun init(context: Context) {
         if (tts != null) return
+        appContext = context.applicationContext
         tts = TextToSpeech(context.applicationContext) { status ->
             ready = status == TextToSpeech.SUCCESS
             failed = !ready
@@ -85,6 +93,27 @@ object TtsEngine {
         if (voicesListener === webView) voicesListener = null
         if (voicesNotifiedFor === webView) voicesNotifiedFor = null
         live.entries.removeAll { it.value === webView }
+    }
+
+    /**
+     * 网页要朗读、系统却念不出来（没引擎 / 没中文语音数据）时说一句人能看懂的话，
+     * 否则用户看到的只有「点了没反应」。每次运行最多提示一次。
+     */
+    private fun warnOnce(reason: String) {
+        if (warned) return
+        warned = true
+        Log.w(TAG, "TTS 不可用：$reason")
+        val ctx = appContext ?: return
+        mainHandler.post {
+            try {
+                Toast.makeText(
+                    ctx,
+                    "朗读失败：$reason\n请到 设置 → 无障碍 → 文字转语音 里检查",
+                    Toast.LENGTH_LONG
+                ).show()
+            } catch (e: Exception) {
+            }
+        }
     }
 
     private fun finish(id: String, err: Boolean) {
@@ -163,6 +192,7 @@ object TtsEngine {
         if (text.isBlank() || id.isBlank()) return
         live[id] = webView
         if (failed) {
+            warnOnce("手机没有可用的语音合成引擎")
             finish(id, true)
             return
         }
@@ -176,6 +206,7 @@ object TtsEngine {
     private fun runSpeak(text: String, lang: String, rate: Double, pitch: Double, voice: String, id: String) {
         val engine = tts
         if (engine == null || failed) {
+            warnOnce("手机没有可用的语音合成引擎")
             finish(id, true)
             return
         }
@@ -185,6 +216,7 @@ object TtsEngine {
                 if (langRes == TextToSpeech.LANG_MISSING_DATA || langRes == TextToSpeech.LANG_NOT_SUPPORTED) {
                     // 系统 TTS 没有中文数据：让页面收到 error 走它的降级链，而不是静默无声
                     Log.w(TAG, "TTS 语言不支持 lang=$lang res=$langRes")
+                    warnOnce("语音引擎缺中文语音数据")
                     finish(id, true)
                     return@post
                 }
