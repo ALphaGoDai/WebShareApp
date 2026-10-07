@@ -536,6 +536,11 @@
     }
     if (!a) return;
     if (a.hasAttribute && a.hasAttribute('download')) return;   // 下载链接交给下载流程
+    // 网页自己声明的「开 App」链接（全家日历的豆瓣条目用 data-app=douban://…，
+    // 且往往同时带 target=_blank）：capture 相在这里劫持的话，页面自己的点击处理器
+    // 会看到 defaultPrevented 而直接放弃，App 内就永远弹不出「此网站请求打开 App」。
+    // 放行给页面处理器 → 它 location.href=douban://… → App 拦截弹条。
+    if (a.hasAttribute && a.hasAttribute('data-app')) return;
     var target = (a.getAttribute('target') || '').toLowerCase();
     if (target !== '_blank') return;
     var href = toAbs(a.getAttribute('href') || a.href);

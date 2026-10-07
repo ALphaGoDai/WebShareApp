@@ -384,6 +384,11 @@ Android 的 WebView 不实现 Web Speech API（`window.speechSynthesis` 整个�
   `resolveActivity` 直接返回空、`startActivity` 抛 `ActivityNotFoundException`**——症状就是
   「点豆瓣链接完全没反应」（旧的代码把异常吞掉了，所以连报错都看不到）。要支持新站点，
   在 `<queries>` 里照格式加一条 `<data android:scheme="…" />` 即可。
+- 注入页面的脚本原本会把所有 `target="_blank"` 的链接转交系统浏览器（方式 I 的「新窗口
+  打开」）；而日历的豆瓣条目恰恰是 `<a data-app="douban://…" target="_blank">`——capture 相
+  先劫持走，页面自己的处理器看到 `defaultPrevented` 就放弃，结果点了只会跳到系统浏览器的
+  **网页版**。现在这类带 `data-app`（网页自己声明的「开 App」链接）会被放行给页面处理器，
+  由它发起 `douban://` 再被 App 拦下弹条。
 
 ## 技术说明
 
