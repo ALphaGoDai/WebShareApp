@@ -360,6 +360,31 @@ Android 的 WebView 不实现 Web Speech API（`window.speechSynthesis` 整个�
    日历表单、学习卡片这种可能正填着一半的页面不动；从设置/已下载/选文件这些我们自己的
    页面回来也不刷。
 
+### 方式 M：网页里「打开 App」的链接（v1.0.36 起）
+
+网页里点一条要跳别的 App 的链接（豆瓣的 `douban://douban.com/movie/35465232`、`weixin://…`，
+或 Chrome 那套 `intent://…#Intent;scheme=…;package=…;end`），App 会在底栏上方弹一条提示：
+
+```
+[图标] 此网站请求打开 App     打开  ✕
+       豆瓣
+```
+
+点「打开」才真的跳走（和 Chrome 一样，不是偷偷跳）；点 ✕ 关上。几个细节：
+
+- **认得出目标 App** 时提示条显示它的真实名字和图标；认不出（没装、或只认识 scheme）就显示
+  按 scheme 猜的中文名（豆瓣/微博/知乎…），再不认识显示「其他应用」——点「打开」会告诉你
+  「手机上没装能打开这个链接的应用」。
+- `intent://` 里带的 `browser_fallback_url`（网页说「App 打不开就用浏览器打开这个网址」）
+  会在打不开时自动在当前标签页里打开。
+- 页面脚本自己在背后乱跳的**陌生** scheme（统计、拉活用的 `adssdk://` 之类）不会弹条，
+  日志里记一句 `忽略脚本跳转的 scheme: …`；`about:` / `data:` / `blob:` / `file:` 这些网页
+  自己的伪协议照旧交给 WebView，不当成「打开别的 App」。
+- 清单里的 `<queries>` 同样不能删：**没有这些 scheme 的声明，Android 11+ 的包可见性会让
+  `resolveActivity` 直接返回空、`startActivity` 抛 `ActivityNotFoundException`**——症状就是
+  「点豆瓣链接完全没反应」（旧的代码把异常吞掉了，所以连报错都看不到）。要支持新站点，
+  在 `<queries>` 里照格式加一条 `<data android:scheme="…" />` 即可。
+
 ## 技术说明
 
 ### DoH 实现原理

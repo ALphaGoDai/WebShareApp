@@ -27,6 +27,26 @@
         <intent>
             <action android:name="android.intent.action.TTS_SERVICE" />
         </intent>
+
+        <!-- 网页里"打开 App"的链接（douban://…）同样受包可见性限制：这里不声明，
+             resolveActivity 拿不到目标、startActivity 直接 ActivityNotFoundException，
+             表现就是"点豆瓣链接没反应"。声明过的 scheme 才能认出 App 名字和图标、
+             把它拉起来。要支持新站点照格式再加一条。 -->
+        <intent><action android:name="android.intent.action.VIEW" /><data android:scheme="douban" /></intent>
+        <intent><action android:name="android.intent.action.VIEW" /><data android:scheme="sinaweibo" /></intent>
+        <intent><action android:name="android.intent.action.VIEW" /><data android:scheme="zhihu" /></intent>
+        <intent><action android:name="android.intent.action.VIEW" /><data android:scheme="bilibili" /></intent>
+        <intent><action android:name="android.intent.action.VIEW" /><data android:scheme="youku" /></intent>
+        <intent><action android:name="android.intent.action.VIEW" /><data android:scheme="iqiyi" /></intent>
+        <intent><action android:name="android.intent.action.VIEW" /><data android:scheme="tencentvideo" /></intent>
+        <intent><action android:name="android.intent.action.VIEW" /><data android:scheme="qqlive" /></intent>
+        <intent><action android:name="android.intent.action.VIEW" /><data android:scheme="taobao" /></intent>
+        <intent><action android:name="android.intent.action.VIEW" /><data android:scheme="alipays" /></intent>
+        <intent><action android:name="android.intent.action.VIEW" /><data android:scheme="weixin" /></intent>
+        <intent><action android:name="android.intent.action.VIEW" /><data android:scheme="snssdk1128" /></intent>
+        <intent><action android:name="android.intent.action.VIEW" /><data android:scheme="xhsdiscover" /></intent>
+        <intent><action android:name="android.intent.action.VIEW" /><data android:scheme="qqmusic" /></intent>
+        <intent><action android:name="android.intent.action.VIEW" /><data android:scheme="orpheuswidget" /></intent>
     </queries>
 
     <application

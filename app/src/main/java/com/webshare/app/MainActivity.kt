@@ -49,6 +49,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tabGrid: RecyclerView
     private lateinit var tabBadge: TextView
 
+    /** 底部那条「此网站请求打开 App」提示（网页要跳 douban:// 之类时出现） */
+    private lateinit var openAppBar: View
+    private lateinit var openAppIcon: ImageView
+    private lateinit var openAppName: TextView
+
     /** 多标签页：每页一个独立 WebView 和桥接实例，切换时换入换出 */
     private inner class Tab(
         val iface: WebAppInterface,
@@ -96,6 +101,15 @@ class MainActivity : AppCompatActivity() {
 
     /** 冷启动那次已经在 initTabs 里加载过了，不用再"回前台刷新" */
     private var firstStartSeen = false
+
+    /** 网页请求打开别的 App：待打开的 Intent + 显示用信息（这条提示条的状态） */
+    private var pendingAppIntent: Intent? = null
+    private var pendingAppFallback: String? = null
+    private var pendingAppUrl = ""
+
+    /** 同一条链接短时间内重复请求（页面点一下可能连发几次），只弹一次条 */
+    private var lastAppPromptUrl = ""
+    private var lastAppPromptAt = 0L
 
     /** 网页里 <input type="file"> 触发的选择回调，选中后必须回填 */
     private var fileChooserCallback: ValueCallback<Array<Uri>>? = null
@@ -201,9 +215,13 @@ class MainActivity : AppCompatActivity() {
         tabSwitcher = findViewById(R.id.tabSwitcher)
         tabGrid = findViewById(R.id.tabGrid)
         tabBadge = findViewById(R.id.tabBadge)
+        openAppBar = findViewById(R.id.openAppBar)
+        openAppIcon = findViewById(R.id.openAppIcon)
+        openAppName = findViewById(R.id.openAppName)
 
         initTabs()
         setupBottomBar()
+        setupOpenAppBar()
         setupBackNavigation()
 
         // 系统 TTS：注入脚本里的 speechSynthesis 补丁靠它出声，早点初始化，页面一问就有嗓音
@@ -704,8 +722,15 @@ class MainActivity : AppCompatActivity() {
             cacheDir = cacheDir,
             onNotice = { note ->
                 runOnUiThread { Toast.makeText(activityContext, note, Toast.LENGTH_LONG).show() }
-            }
+            },
+            onOpenExternalApp = { url -> runOnUiThread { promptOpenApp(url) } }
         ) {
+            override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                super.onPageStarted(view, url, favicon)
+                // 页面换了一页，上一条"打开 App"的提示就过期了
+                hideOpenAppBar()
+            }
+
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
                 // 记下标签页标题/地址，切换器卡片和角标用
@@ -732,6 +757,56 @@ class MainActivity : AppCompatActivity() {
                     view.postDelayed({ reportAutoUpload(view) }, 1800)
                 }
             }
+        }
+    }
+
+    // ---------- 网页请求打开别的 App（Chrome 的「此网站请求打开 App」） ----------
+
+    private fun setupOpenAppBar() {
+        findViewById<View>(R.id.openAppGo).setOnClickListener { openPendingApp() }
+        findViewById<View>(R.id.openAppClose).setOnClickListener { hideOpenAppBar() }
+    }
+
+    /** 网页要打开手机上另一个 App（douban://…）：弹提示条，点「打开」才真的跳 */
+    private fun promptOpenApp(url: String) {
+        val target = ExternalApp.resolve(this, url) ?: return
+        val now = SystemClock.elapsedRealtime()
+        // 一次点击页面可能连发几条同样的跳转，只提示一次（不然闪个不停）
+        if (url == lastAppPromptUrl && now - lastAppPromptAt < 3000) return
+        lastAppPromptUrl = url
+        lastAppPromptAt = now
+        pendingAppUrl = url
+        pendingAppIntent = target.intent
+        pendingAppFallback = target.fallbackUrl
+        openAppName.text = target.label
+        if (target.icon != null) {
+            openAppIcon.setImageDrawable(target.icon)
+        } else {
+            // 认不出目标 App（没装 / 被包可见性挡住）：用通用图标，点开时会再提示一句
+            openAppIcon.setImageResource(R.drawable.ic_nav_open_app)
+        }
+        openAppBar.visibility = View.VISIBLE
+        Log.i(TAG, "网页请求打开 App：$url → ${target.label}（图标=${target.icon != null}）")
+    }
+
+    private fun hideOpenAppBar() {
+        if (this::openAppBar.isInitialized) openAppBar.visibility = View.GONE
+        pendingAppUrl = ""
+        pendingAppIntent = null
+        pendingAppFallback = null
+    }
+
+    private fun openPendingApp() {
+        val intent = pendingAppIntent
+        val fallback = pendingAppFallback
+        hideOpenAppBar()
+        if (intent == null) return
+        if (ExternalApp.launch(this, intent)) return
+        Toast.makeText(this, "手机上没装能打开这个链接的应用", Toast.LENGTH_LONG).show()
+        // intent:// 允许网页带一个"打不开就用浏览器打开"的兜底网址
+        if (!fallback.isNullOrBlank()) {
+            Log.i(TAG, "App 打不开，改用兜底网址：$fallback")
+            webView.loadUrl(fallback)
         }
     }
 
@@ -889,6 +964,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun switchTo(index: Int) {
         if (index !in tabs.indices) return
+        hideOpenAppBar()   // 换标签页了，上一条"打开 App"的提示过期
         if (currentIndex in tabs.indices && currentIndex != index) {
             captureThumb(tabs[currentIndex])
         }

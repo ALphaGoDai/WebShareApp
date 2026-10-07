@@ -34,7 +34,12 @@ open class DohWebViewClient(
     /** 录像时间轴修复用的缓存目录（App cacheDir） */
     private val cacheDir: java.io.File? = null,
     /** 向用户提示修复结果（在拦截线程回调，调用方自己切主线程） */
-    private val onNotice: ((String) -> Unit)? = null
+    private val onNotice: ((String) -> Unit)? = null,
+    /**
+     * 网页要打开别的 App（douban:// 、intent://…）：交回界面弹提示条，而不是偷偷 startActivity。
+     * 为 null 时退回"直接开一次"的老行为。
+     */
+    private val onOpenExternalApp: ((String) -> Unit)? = null
 ) : WebViewClient() {
 
     private val dnsResolver: DohDnsResolver? = if (dohEnabled && dohUrl.isNotEmpty()) {
@@ -692,8 +697,24 @@ open class DohWebViewClient(
         val url = request?.url ?: return false
         val s = url.scheme ?: return false
         if (s == "http" || s == "https") return false
+
+        // 网页里的伪协议 / 本机地址交给 WebView 自己处理（about:blank、blob:、data:…）
+        if (!ExternalApp.isExternal(url.toString())) return false
+
+        // 页面脚本可能在背后乱跳各种 scheme（统计、拉活），只认"用户点出来的"
+        // 和我们认识的 scheme，别弹一堆莫名其妙的条
+        if (!request.hasGesture() && !ExternalApp.isKnownScheme(url.toString())) {
+            Log.i(TAG, "忽略脚本跳转的 scheme: $url")
+            return true
+        }
+
+        val prompt = onOpenExternalApp
+        if (prompt != null) {
+            prompt(url.toString())   // 交回界面弹「此网站请求打开 App」提示条
+            return true
+        }
         try {
-            val intent = Intent(Intent.ACTION_VIEW, url)
+            val intent = ExternalApp.parse(url.toString()) ?: return true
             intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
             view?.context?.startActivity(intent)
         } catch (e: Exception) {

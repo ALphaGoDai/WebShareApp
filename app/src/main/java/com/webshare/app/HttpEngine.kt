@@ -65,10 +65,10 @@ class HttpEngine(
         try {
             return openWithOkHttp(urlStr, extraHeaders)
         } catch (e: Exception) {
-            lastError = e
             // 连不上/超时/域名解析不了是"链路层"的事，换 raw socket 一样连不上；
             // 再试一轮只会让用户多等一个超时（服务器宕机时最明显）。协议/证书类问题才值得重试。
             if (isTransportFailure(e)) throw e
+            lastError = e
         }
 
         // 宽松解析通道（原始 Socket）

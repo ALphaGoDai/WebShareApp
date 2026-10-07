@@ -161,6 +161,81 @@
         </LinearLayout>
     </LinearLayout>
 
+    <!-- 网页请求打开别的 App（douban:// 豆瓣 之类）：浮在底栏上方的一条提示，
+         和 Chrome 的「此网站请求打开 App」一样，点「打开」才真的跳走 -->
+    <LinearLayout
+        android:id="@+id/openAppBar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:layout_marginStart="12dp"
+        android:layout_marginEnd="12dp"
+        android:layout_marginBottom="64dp"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:background="@drawable/bg_open_app_bar"
+        android:elevation="12dp"
+        android:paddingStart="14dp"
+        android:paddingEnd="4dp"
+        android:paddingTop="10dp"
+        android:paddingBottom="10dp"
+        android:visibility="gone">
+
+        <ImageView
+            android:id="@+id/openAppIcon"
+            android:layout_width="36dp"
+            android:layout_height="36dp"
+            android:src="@drawable/ic_nav_open_app"
+            android:contentDescription="打开的应用" />
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="12dp"
+            android:orientation="vertical">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="此网站请求打开 App"
+                android:textSize="15sp"
+                android:textColor="#202124" />
+
+            <TextView
+                android:id="@+id/openAppName"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="1dp"
+                android:textSize="13sp"
+                android:textColor="#5F6368" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/openAppGo"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:paddingStart="14dp"
+            android:paddingEnd="14dp"
+            android:paddingTop="10dp"
+            android:paddingBottom="10dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:text="打开"
+            android:textSize="15sp"
+            android:textStyle="bold"
+            android:textColor="@color/purple_500" />
+
+        <ImageView
+            android:id="@+id/openAppClose"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:padding="8dp"
+            android:src="@drawable/ic_nav_close"
+            android:tint="#5F6368"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="不再提示" />
+    </LinearLayout>
+
     <!-- 标签页切换器（全屏覆盖层，Chrome 风格卡片网格） -->
     <FrameLayout
         android:id="@+id/tabSwitcher"
