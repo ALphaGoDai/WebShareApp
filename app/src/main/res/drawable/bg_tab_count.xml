@@ -1,0 +1,5 @@
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+    <!-- 底栏「标签页」按钮：方格 + 当前标签页数（数字就画在这格里） -->
+    <stroke android:width="2dp" android:color="@color/purple_500" />
+    <corners android:radius="6dp" />
+</shape>
