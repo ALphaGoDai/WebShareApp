@@ -430,6 +430,13 @@ Android 的 WebView 不实现 Web Speech API（`window.speechSynthesis` 整个�
 - Cookie 通过 `CookieManager` 在 WebView 和 OkHttp 之间自动同步
 - 子资源（图片/视频/脚本）拦截失败时返回 `null` 交给 WebView 处理，**不会**塞 HTML 错误页——
   否则 `<video>` 会把网络错误报成"解码失败"，页面的重试/转码逻辑会被带偏
+- **主框架（主页面）的 301/302 不由 App 内部跟完，而是整条导航交回 WebView**（v1.0.41 起）：
+  代理内部把跳转跟完会把页面挂在**跳转前的地址**下，页面里的相对路径（`js/chunk-vendors.js`
+  这种）就会解析到错的目录——厦门乘车码的登录页正是这么白屏的（JS 取回来是 200 +
+  `application/json`，内核按「MIME 不可执行」拒绝执行）。`WebResourceResponse` 本身不允许
+  3xx 状态码，所以做法是「发现要跳转就返回 `null` 不拦」，让 WebView 照标准跳（地址栏、
+  相对路径基址、同域判断才对）。子资源仍照旧内部跟跳。代价：被交回的**这一跳**不走自定义
+  DNS——只认自定义 DNS 的站点若又恰好整站跳转，可能连不上（日常站点不受影响）
 - 页面是 `http://` 源、而站点实际只开 TLS（端口 7777）时，网页原生 POST 必然被重置，
   此时全靠注入脚本的桥接兜底；桥接内部会在 http / https 之间自动回退
 - 下载与上传走 `HttpEngine`（流式，不整包进内存）；下载交给前台服务，
