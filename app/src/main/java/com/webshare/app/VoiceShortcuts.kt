@@ -34,7 +34,13 @@ object VoiceShortcuts {
     /** 语音助手/桌面快捷指令这类"外部替我打开 App"的包名线索（华为：vassistant / 快捷指令） */
     private val ASSISTANT_HINTS = listOf(
         "vassistant", "voiceassist", "voice", "assistant", "celia",
-        "hivoice", "hiassistant", "quickaction", "shortcut"
+        "hivoice", "hiassistant", "quickaction", "shortcut", "quick", "smart", "hiboard"
+    )
+
+    /** 这些来源是"用户自己点开的"（桌面、最近任务、系统界面、设置），不能当成助手 */
+    private val USER_LAUNCH_HINTS = listOf(
+        "launcher", "home", "desktop", "systemui", "recents", "settings",
+        "shell", "packageinstaller", "permissioncontroller", "android"
     )
 
     class Item(val id: String, val name: String, val url: String)
@@ -148,9 +154,16 @@ object VoiceShortcuts {
         url
     }
 
-    /** 这次唤起是不是语音助手/桌面快捷指令这类"别人替我打开"的 */
+    /**
+     * 这次唤起是不是语音助手/桌面快捷指令这类"别人替我打开"的。
+     *
+     * 认得出的助手包名（vassistant、快捷指令…）直接算；此外——只有当调用方**明显不是**用户自己
+     * 点开的来源（桌面/最近任务/系统界面/adb shell）时，也当作"外部程序替我打开的"：手机助手
+     * 的包名各机型不一样，认不出就漏掉的话用户就白配了。桌面点开图标永远不会误判。
+     */
     fun looksLikeAssistant(pkg: String): Boolean {
         val p = pkg.lowercase()
-        return ASSISTANT_HINTS.any { p.contains(it) }
+        if (ASSISTANT_HINTS.any { p.contains(it) }) return true
+        return p.isNotEmpty() && USER_LAUNCH_HINTS.none { p.contains(it) }
     }
 }
