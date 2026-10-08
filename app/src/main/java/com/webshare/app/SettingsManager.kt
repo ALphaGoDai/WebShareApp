@@ -40,6 +40,15 @@ class SettingsManager(context: Context) {
             prefs.edit().putBoolean(KEY_DOH_ENABLED, true).apply()
             prefs.edit().putInt(KEY_SETTINGS_VERSION, 2).apply()
         }
+        if (version < 3) {
+            // 安装包名 v1.0.44 起从 WebShareApp.apk 改成 DnsWeb.apk，老地址会 404；
+            // 用户自己填过别的地址就不动
+            val oldUpdate = prefs.getString(KEY_UPDATE_URL, "") ?: ""
+            if (oldUpdate.isEmpty() || oldUpdate.endsWith("/download/WebShareApp.apk")) {
+                prefs.edit().putString(KEY_UPDATE_URL, DEFAULT_UPDATE_URL).apply()
+            }
+            prefs.edit().putInt(KEY_SETTINGS_VERSION, 3).apply()
+        }
     }
 
     companion object {
@@ -52,6 +61,6 @@ class SettingsManager(context: Context) {
         const val DEFAULT_URL = "http://send.nbhonghong.top:7777/"
         const val DEFAULT_DOH_URL = "https://doh.pub/dns-query"
         const val DEFAULT_UPDATE_URL =
-            "https://github.com/ALphaGoDai/WebShareApp/releases/latest/download/WebShareApp.apk"
+            "https://github.com/ALphaGoDai/WebShareApp/releases/latest/download/DnsWeb.apk"
     }
 }
