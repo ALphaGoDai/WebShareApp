@@ -88,6 +88,9 @@ class MainActivity : AppCompatActivity() {
     /** 页面加载完成后要注入的「自动上传」脚本；空表示这次分享不需要自动上传 */
     private var pendingAutoUploadJs: String? = null
 
+    /** 攒一下再落盘的 Cookie 写盘任务（见 scheduleCookieFlush） */
+    private val flushCookiesRunnable = Runnable { flushCookies() }
+
     private var settingsLauncher: ActivityResultLauncher<Intent>? = null
 
     /** 用户主动关掉最后一个标签页（=有意识地"清空"）：只有这一种退出才抹掉落盘的标签页 */
@@ -227,6 +230,9 @@ class MainActivity : AppCompatActivity() {
         // 系统 TTS：注入脚本里的 speechSynthesis 补丁靠它出声，早点初始化，页面一问就有嗓音
         TtsEngine.init(this)
 
+        // 语音快捷指令同步成桌面快捷方式（设置里改了名字/网址，这里每次启动再对齐一次）
+        VoiceShortcuts.sync(this)
+
         settingsLauncher = registerForActivityResult(
             ActivityResultContracts.StartActivityForResult()
         ) { result ->
@@ -248,6 +254,27 @@ class MainActivity : AppCompatActivity() {
         super.onStop()
         lastStoppedAt = SystemClock.elapsedRealtime()
         persistTabs(commit = true)   // 退到后台先把标签页记下来（同步落盘，进程随后被杀也带得走）
+        flushCookies()               // 登录状态同理：不落盘的话进程被杀就丢，下次还得重新登录
+    }
+
+    // ---------- 登录状态（Cookie） ----------
+
+    /**
+     * Cookie 落盘。WebView 平时把 Cookie 攒在内存里，进程被系统回收就没了——
+     * 用户看到的就是"刚登录过的站点下次打开又要重新登录"。页面加载完和退到后台各写一次。
+     */
+    private fun flushCookies() {
+        try {
+            android.webkit.CookieManager.getInstance().flush()
+        } catch (e: Exception) {
+            Log.w(TAG, "cookie flush 失败: ${e.message}")
+        }
+    }
+
+    /** 页面加载完别立刻 flush（连跳几页会写好几遍），攒一下再落盘 */
+    private fun scheduleCookieFlush() {
+        webView.removeCallbacks(flushCookiesRunnable)
+        webView.postDelayed(flushCookiesRunnable, 1200)
     }
 
     override fun onStart() {
@@ -290,6 +317,23 @@ class MainActivity : AppCompatActivity() {
 
     private fun handleIntent(intent: Intent?) {
         val action = intent?.action
+
+        // 语音快捷方式 / 外部工具唤起：webshare://voice/<id> → 直达那条配置的页面
+        val data = intent?.data
+        if (action == Intent.ACTION_VIEW && data?.scheme == VoiceShortcuts.SCHEME) {
+            val item = data.lastPathSegment?.let { VoiceShortcuts.find(this, it) }
+            if (item != null) {
+                Log.i(TAG, "快捷方式唤起：「${item.name}」→ ${item.url}")
+                openUrlInTab(item.url)
+                return
+            }
+            Log.w(TAG, "快捷方式找不到对应的配置: $data")
+        }
+
+        // 语音助手（小艺 / 华为快捷指令）只会"打开应用"时，靠 referrer 认出它，直达设置里指定的那页
+        // （桌面点开图标也是 MAIN 且没有 referrer → 正常开标签页，不受影响）
+        if ((action == null || action == Intent.ACTION_MAIN) && data == null && maybeVoiceAssistantJump()) return
+
         if (action == Intent.ACTION_SEND || action == Intent.ACTION_SEND_MULTIPLE) {
             val type = intent.type ?: ""
             if (type.startsWith("text/")) {
@@ -324,6 +368,52 @@ class MainActivity : AppCompatActivity() {
             pendingAutoUploadJs = null
         }
         loadUrl()
+    }
+
+    /**
+     * 语音助手唤起检测：小艺、华为「快捷指令」这类能配的只有"打开应用"一个动作，
+     * 所以认出处是它们就够了——设置里指定了"语音助手打开时直接进"的那条，就直达那页
+     * （网页仍在自己这个浏览器里打开，自定义 DNS 照常生效）。桌面图标点开时 referrer 是桌面，不跳。
+     */
+    private fun maybeVoiceAssistantJump(): Boolean {
+        val ref = launchReferrer()
+        val pkg = ref?.authority?.takeIf { it.isNotBlank() } ?: ref?.host ?: ""
+        if (pkg.isNotEmpty()) VoiceShortcuts.setLastReferrer(this, pkg)
+        Log.i(TAG, "本次打开来源: ${pkg.ifEmpty { "(没有 referrer)" }}")
+        if (pkg.isEmpty() || !VoiceShortcuts.looksLikeAssistant(pkg)) return false
+        val targetId = VoiceShortcuts.assistantTarget(this)
+        if (targetId.isEmpty()) return false
+        val item = VoiceShortcuts.find(this, targetId) ?: return false
+        Log.i(TAG, "语音助手唤起，直达「${item.name}」${item.url}")
+        openUrlInTab(item.url)
+        return true
+    }
+
+    /** 这次是谁把 App 叫起来的（语音助手会在 referrer 里留下包名） */
+    @Suppress("DEPRECATION")
+    private fun launchReferrer(): Uri? {
+        try {
+            (intent?.getParcelableExtra(Intent.EXTRA_REFERRER) as? Uri)?.let { return it }
+        } catch (e: Exception) {
+        }
+        return try {
+            referrer
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /** 打开一条指定网址：已经有同一地址的标签页就切过去刷新，否则新开一个（不动其它标签页） */
+    private fun openUrlInTab(url: String) {
+        val exist = tabs.indexOfFirst { it.url == url || it.pendingUrl == url }
+        if (exist >= 0) {
+            switchTo(exist)
+            tabs[exist].webView.reload()
+            return
+        }
+        val tab = addTab()
+        tab.url = url
+        tab.webView.loadUrl(url)
     }
 
     /** ACTION_SEND（单个）与 ACTION_SEND_MULTIPLE（相册多选）都从 EXTRA_STREAM 取 uri */
@@ -496,6 +586,12 @@ class MainActivity : AppCompatActivity() {
         settings.setSupportMultipleWindows(false)
         // 页面里的播放器在自动重试/转码完成后会直接 play()，此时用户手势可能已过期
         settings.mediaPlaybackRequiresUserGesture = false
+
+        // 登录状态（Cookie）要跨重启记住：① 明确接受 Cookie；② 第三方 Cookie 也接受——
+        // 政务/统一认证这类站点登录时要在多个域名/子域之间跳转，默认关掉会让登录态存不下来
+        val cookieManager = android.webkit.CookieManager.getInstance()
+        cookieManager.setAcceptCookie(true)
+        cookieManager.setAcceptThirdPartyCookies(wv, true)
 
         wv.webViewClient = createWebViewClient()
         wv.webChromeClient = object : WebChromeClient() {
@@ -733,6 +829,7 @@ class MainActivity : AppCompatActivity() {
 
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
+                scheduleCookieFlush()   // 刚登录/刚拿到会话的 Cookie 及时落盘
                 // 记下标签页标题/地址，切换器卡片和角标用
                 tabs.firstOrNull { it.webView === view }?.let { tab ->
                     tab.title = view?.title?.takeIf { it.isNotBlank() } ?: tab.title
@@ -834,14 +931,15 @@ class MainActivity : AppCompatActivity() {
             // Visual feedback for long press
             val bar = findViewById<View>(R.id.bottomBar)
             bar.alpha = 0.5f
-            Toast.makeText(this, "正在清除缓存并刷新...", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "正在清除缓存并刷新（登录状态保留）...", Toast.LENGTH_SHORT).show()
 
             // Clear all caches
             webView.clearCache(true)
             webView.clearHistory()
-            // Also clear cookies for a full force refresh
-            android.webkit.CookieManager.getInstance().removeAllCookies { }
-            android.webkit.CookieManager.getInstance().flush()
+            // 注意：这里不清 Cookie —— Cookie 是各网站的登录状态，不是缓存。
+            // 原来顺手 removeAllCookies 会让用户"强制刷新一下就退出所有网站登录"。
+            // 真要清登录状态去 设置 → 清除所有网站登录状态（Cookie）。
+            flushCookies()
 
             // Reload with cache bypass
             webView.settings.cacheMode = WebSettings.LOAD_NO_CACHE
