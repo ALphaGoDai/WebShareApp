@@ -76,6 +76,20 @@ open class DohWebViewClient(
             .build()
     }
 
+    /**
+     * 主框架导航用这个：不跟重定向。
+     *
+     * 代理层在内部把 302 跟完、把最终 HTML 挂在**旧地址**下回给 WebView，会让文档地址停在
+     * 跳转前的 URL 上。页面里的相对路径（`js/chunk-vendors.js` 这类）是按文档地址解析的，
+     * 于是全指向错的目录——政务/统一认证那种「HTML 用相对路径引 JS」的页面就白屏
+     * （实测：厦门乘车码的登录页 JS 取到 200 + application/json，被浏览器按 MIME 拒绝执行）。
+     * 所以主框架的跳转一律交回 WebView 自己走，地址栏和相对路径基址才是对的；
+     * 每一跳仍会再进 shouldInterceptRequest，DNS/Cookie/注入照旧生效。
+     */
+    private val httpsClientNoRedirect: OkHttpClient by lazy {
+        httpsClient.newBuilder().followRedirects(false).build()
+    }
+
     override fun shouldInterceptRequest(
         view: WebView?,
         request: WebResourceRequest?
@@ -100,7 +114,10 @@ open class DohWebViewClient(
             urlStr = urlStr.replace("https://", "http://", ignoreCase = true)
         }
 
-        return try {
+        // 主框架这一跳如果刚才已经交回 WebView，就别再探一次（防重复请求/打转）
+        if (request.isForMainFrame && recentlyDeclined(urlStr)) return null
+
+        val result = try {
             smartFetch(urlStr, host, request.requestHeaders, request.isForMainFrame)
         } catch (e: Exception) {
             if (request.isForMainFrame) {
@@ -114,6 +131,19 @@ open class DohWebViewClient(
                 null
             }
         }
+        if (request.isForMainFrame && result == null) {
+            declinedNavigations[urlStr] = System.currentTimeMillis()
+        }
+        return result
+    }
+
+    /** 刚交回 WebView 自己走的主框架地址（短时记忆，见 recentlyDeclined） */
+    private val declinedNavigations = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    private fun recentlyDeclined(urlStr: String): Boolean {
+        val now = System.currentTimeMillis()
+        declinedNavigations.entries.removeAll { now - it.value > DECLINE_TTL_MS }
+        return declinedNavigations.containsKey(urlStr)
     }
 
     private fun toHttps(u: String) =
@@ -161,7 +191,7 @@ open class DohWebViewClient(
         host: String,
         headers: Map<String, String>,
         isMainFrame: Boolean
-    ): WebResourceResponse {
+    ): WebResourceResponse? {
         if (!isVideoResponse(null, urlStr) || !rangeStartsAtZero(headers)) {
             return dispatchFetch(urlStr, host, headers, isMainFrame)
         }
@@ -180,7 +210,8 @@ open class DohWebViewClient(
     }
 
     /** 206 但 Content-Range 覆盖 0..N-1（= 拿到整份文件）时改以 200 交出 */
-    private fun serveWholeVideo(resp: WebResourceResponse): WebResourceResponse {
+    private fun serveWholeVideo(resp: WebResourceResponse?): WebResourceResponse? {
+        if (resp == null) return null                      // 已决定交回 WebView
         if (resp.statusCode == 200) return resp            // 本来就是整份
         val stream = resp.data ?: return resp
         val len = if (stream is ByteArrayInputStream) stream.available() else return resp
@@ -208,24 +239,26 @@ open class DohWebViewClient(
         host: String,
         headers: Map<String, String>,
         isMainFrame: Boolean
-    ): WebResourceResponse {
+    ): WebResourceResponse? {
         if (urlStr.startsWith("https://", ignoreCase = true)) {
             try {
-                return maybeInjectShim(fetchWithOkHttp(urlStr, headers), isMainFrame)
+                return maybeInjectShim(fetchWithOkHttp(urlStr, headers, isMainFrame), isMainFrame)
             } catch (e: Exception) {
                 // 连不上/超时这类链路问题，换 TLS 原始通道也一样连不上：直接失败，别多等一轮
                 if (isTransportFailure(e)) throw e
                 // OkHttp is strict about response parsing; retry over a raw
                 // TLS socket with the lenient parser.
                 try {
-                    return maybeInjectShim(fetchWithTlsRawSocket(urlStr, headers), isMainFrame)
+                    return maybeInjectShim(
+                        fetchWithTlsRawSocket(urlStr, headers, isMainFrame), isMainFrame
+                    )
                 } catch (e2: Exception) {
                     // Site may actually be plain http (misconfigured scheme)
                     if (configuredHost.isNotEmpty() && host == configuredHost) {
                         return maybeInjectShim(
                             fetchWithRawSocket(
                                 urlStr.replaceFirst("https://", "http://", ignoreCase = true),
-                                headers
+                                headers, isMainFrame
                             ),
                             isMainFrame
                         )
@@ -237,14 +270,18 @@ open class DohWebViewClient(
 
         // Cleartext URL
         if (tlsOnlyHosts[host] == true) {
-            return maybeInjectShim(fetchWithTlsRawSocket(toHttps(urlStr), headers), isMainFrame)
+            return maybeInjectShim(
+                fetchWithTlsRawSocket(toHttps(urlStr), headers, isMainFrame), isMainFrame
+            )
         }
         return try {
-            maybeInjectShim(fetchWithRawSocket(urlStr, headers), isMainFrame)
+            maybeInjectShim(fetchWithRawSocket(urlStr, headers, isMainFrame), isMainFrame)
         } catch (e: Exception) {
             if (isTransportFailure(e)) throw e
             // Some servers only accept TLS even on non-standard ports
-            val resp = maybeInjectShim(fetchWithTlsRawSocket(toHttps(urlStr), headers), isMainFrame)
+            val resp = maybeInjectShim(
+                fetchWithTlsRawSocket(toHttps(urlStr), headers, isMainFrame), isMainFrame
+            )
             tlsOnlyHosts[host] = true
             resp
         }
@@ -256,9 +293,10 @@ open class DohWebViewClient(
      * page scripts, which is too late to intercept their network calls.
      */
     private fun maybeInjectShim(
-        resp: WebResourceResponse,
+        resp: WebResourceResponse?,
         isMainFrame: Boolean
-    ): WebResourceResponse {
+    ): WebResourceResponse? {
+        if (resp == null) return null                     // 已决定把这一跳交回 WebView
         if (!isMainFrame || shimJs.isEmpty()) return resp
         val mime = resp.mimeType ?: return resp
         if (!mime.contains("html", ignoreCase = true)) return resp
@@ -333,8 +371,9 @@ open class DohWebViewClient(
 
     private fun fetchWithOkHttp(
         urlStr: String,
-        headers: Map<String, String>
-    ): WebResourceResponse {
+        headers: Map<String, String>,
+        forwardRedirects: Boolean = false
+    ): WebResourceResponse? {
         val builder = okhttp3.Request.Builder().url(urlStr)
         for ((key, value) in headers) {
             if (!key.equals("Accept-Encoding", true) && !key.equals("Cookie", true)) {
@@ -349,7 +388,19 @@ open class DohWebViewClient(
             )
         }
 
-        httpsClient.newCall(builder.build()).execute().use { response ->
+        val client = if (forwardRedirects) httpsClientNoRedirect else httpsClient
+        client.newCall(builder.build()).execute().use { response ->
+            // 主框架的跳转不能自己吞掉：WebResourceResponse 不允许 3xx（Android 直接抛
+            // “statusCode can't be in the [300, 399] range”），所以这一跳整条导航交回
+            // WebView 自己走——返回 null。上面 httpsClientNoRedirect 那段的注释解释了原因。
+            if (forwardRedirects && response.code in 300..399) {
+                Log.i(
+                    TAG,
+                    "主框架跳转交回 WebView: ${response.code} $urlStr -> ${response.header("Location")}"
+                )
+                return null
+            }
+
             val ct = response.header("Content-Type") ?: "text/html"
             val parts = ct.split(";")
             val mime = parts[0].trim()
@@ -383,8 +434,9 @@ open class DohWebViewClient(
 
     private fun fetchWithRawSocket(
         urlStr: String,
-        headers: Map<String, String>
-    ): WebResourceResponse {
+        headers: Map<String, String>,
+        declineRedirect: Boolean = false
+    ): WebResourceResponse? {
         val parsed = URL(urlStr)
         val port = parsed.port.takeIf { it > 0 } ?: parsed.defaultPort
         val ip = resolveHost(parsed.host)
@@ -393,7 +445,7 @@ open class DohWebViewClient(
         try {
             socket.connect(InetSocketAddress(ip, port), 15000)
             socket.soTimeout = 15000
-            return exchangeOverSocket(socket, parsed, urlStr, headers)
+            return exchangeOverSocket(socket, parsed, urlStr, headers, declineRedirect)
         } finally {
             try { socket.close() } catch (_: Exception) {}
         }
@@ -401,8 +453,9 @@ open class DohWebViewClient(
 
     private fun fetchWithTlsRawSocket(
         urlStr: String,
-        headers: Map<String, String>
-    ): WebResourceResponse {
+        headers: Map<String, String>,
+        declineRedirect: Boolean = false
+    ): WebResourceResponse? {
         val parsed = URL(urlStr)
         val host = parsed.host
         val port = parsed.port.takeIf { it > 0 } ?: parsed.defaultPort
@@ -424,7 +477,7 @@ open class DohWebViewClient(
                 ) {
                     throw java.io.IOException("TLS证书主机名不匹配: $host")
                 }
-                return exchangeOverSocket(ssl, parsed, urlStr, headers)
+                return exchangeOverSocket(ssl, parsed, urlStr, headers, declineRedirect)
             } finally {
                 try { ssl.close() } catch (_: Exception) {}
             }
@@ -437,8 +490,9 @@ open class DohWebViewClient(
         socket: Socket,
         parsed: URL,
         originalUrl: String,
-        headers: Map<String, String>
-    ): WebResourceResponse {
+        headers: Map<String, String>,
+        declineRedirect: Boolean = false
+    ): WebResourceResponse? {
         val host = parsed.host
         val port = parsed.port.takeIf { it > 0 } ?: parsed.defaultPort
         val path = (parsed.path.ifEmpty { "/" }) +
@@ -490,7 +544,7 @@ open class DohWebViewClient(
             throw java.io.IOException("服务器接受连接但未返回任何数据")
         }
 
-        return parseRawResponse(responseData, originalUrl)
+        return parseRawResponse(responseData, originalUrl, declineRedirect)
     }
 
     private fun resolveHost(host: String): String {
@@ -503,7 +557,11 @@ open class DohWebViewClient(
         }
     }
 
-    private fun parseRawResponse(data: ByteArray, originalUrl: String): WebResourceResponse {
+    private fun parseRawResponse(
+        data: ByteArray,
+        originalUrl: String,
+        declineRedirect: Boolean = false
+    ): WebResourceResponse? {
         // Skip leading CR/LF junk some servers emit before the status line
         var start = 0
         while (start < data.size &&
@@ -567,6 +625,13 @@ open class DohWebViewClient(
                     responseHeaders[key] = value
                 }
             }
+        }
+
+        // 主框架的跳转交回 WebView 自己走（WebResourceResponse 不允许 3xx）。放在头部循环
+        // 之后是为了 Set-Cookie 已经存进 CookieManager，WebView 那一跳会带上。
+        if (declineRedirect && statusCode in 300..399) {
+            Log.i(TAG, "主框架跳转交回 WebView: $statusCode $originalUrl")
+            return null
         }
 
         var finalBody = if (isChunked) dechunk(bodyBytes) else bodyBytes
@@ -759,6 +824,9 @@ open class DohWebViewClient(
 
         /** 视频"整份返回"的上限：超过这个大小就退回按 Range 取，免得为了播一个片子吃掉太多内存 */
         private const val VIDEO_WHOLE_CAP = 64L * 1024 * 1024
+
+        /** 「这一跳交回 WebView」的记忆时长：够挡掉同一次导航的重复回调，又不影响用户再点一次 */
+        private const val DECLINE_TTL_MS = 5000L
 
         private val VIDEO_EXTS = listOf(
             ".mp4", ".m4v", ".mov", ".mkv", ".webm", ".avi", ".3gp", ".3gpp",

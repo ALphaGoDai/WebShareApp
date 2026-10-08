@@ -1149,12 +1149,17 @@ class MainActivity : AppCompatActivity() {
     private fun withoutSharedParam(url: String): String {
         val qIdx = url.indexOf('?')
         if (qIdx < 0) return url
+        // 查询串可能落在 # 之前（普通地址 a/b?x=1#f），也可能在 # 之后（hash 路由：
+        // /pbc/usercenter/web/#/oauth/authorize?...）。旧写法假设 # 一定在后面，
+        // 遇到 hash 在前的地址 substring(起点 > 终点) 直接崩 App，所以按「有 ? 的那一段」取。
         val fragIdx = url.indexOf('#').let { if (it >= 0) it else url.length }
-        val kept = url.substring(qIdx + 1, fragIdx)
+        val from = qIdx + 1
+        val to = if (qIdx < fragIdx) fragIdx else url.length
+        val kept = url.substring(from, to)
             .split('&')
             .filter { it.substringBefore('=').trim() != "shared" }
-        val head = if (kept.isEmpty()) url.substring(0, qIdx) else url.substring(0, qIdx + 1) + kept.joinToString("&")
-        return head + url.substring(fragIdx)
+        if (kept.isEmpty()) return url.substring(0, qIdx) + url.substring(to)
+        return url.substring(0, from) + kept.joinToString("&") + url.substring(to)
     }
 
     /** 把当前画面缩成一张卡片缩略图（只对挂在前台的 WebView 画，后台页没有画面） */
