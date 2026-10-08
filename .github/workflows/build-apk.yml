@@ -53,7 +53,7 @@ jobs:
     - name: Upload APK Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: WebShareApp-release-apk
+        name: DnsWeb-release-apk
         path: app/build/outputs/apk/release/*.apk
         retention-days: 30
 
@@ -62,13 +62,13 @@ jobs:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         BUILD_NUMBER: ${{ github.run_number }}
       run: |
-        cp app/build/outputs/apk/release/app-release.apk WebShareApp.apk
+        cp app/build/outputs/apk/release/app-release.apk DnsWeb.apk
         gh release delete latest --yes --cleanup-tag 2>/dev/null || true
-        gh release create latest WebShareApp.apk \
-          --title "WebShareApp v1.0.$BUILD_NUMBER" \
+        gh release create latest DnsWeb.apk \
+          --title "DnsWeb v1.0.$BUILD_NUMBER" \
           --notes "自动构建 v1.0.$BUILD_NUMBER
 
-        直接下载 WebShareApp.apk 安装即可覆盖升级，无需卸载旧版本。
+        直接下载 DnsWeb.apk 安装即可覆盖升级，无需卸载旧版本。
 
         永久下载地址（手机浏览器可直接打开）：
-        https://github.com/ALphaGoDai/WebShareApp/releases/latest/download/WebShareApp.apk"
+        https://github.com/ALphaGoDai/WebShareApp/releases/latest/download/DnsWeb.apk"

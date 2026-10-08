@@ -31,6 +31,14 @@ object VoiceShortcuts {
     const val SCHEME = "webshare"
     private const val SHORTCUT_ID_PREFIX = "voice_"
 
+    /**
+     * 「标签页备注名」条目的 id 前缀。备注名是用户在标签卡片上长按标题设的
+     * （见 MainActivity.editTabAlias），它不是本文件里的"手动配置"，
+     * 而是每次同步时由 MainActivity 传进来（tabEntries），所以 id 用前缀区分，
+     * 唤起时也知道该去切标签页而不是开一条新网址。
+     */
+    const val TAB_PREFIX = "tab:"
+
     /** 语音助手/桌面快捷指令这类"外部替我打开 App"的包名线索（华为：vassistant / 快捷指令） */
     private val ASSISTANT_HINTS = listOf(
         "vassistant", "voiceassist", "voice", "assistant", "celia",
@@ -119,19 +127,32 @@ object VoiceShortcuts {
     /**
      * 把配置同步成动态快捷方式。桌面长按图标能看到；手机助手支持"按快捷方式名直达"的话，
      * 说「打开<App名><名称>」就能进来。
+     *
+     * @param entries 标签页备注名那几条（MainActivity 传进来的）。传 null = 沿用上次那份——
+     *                设置页里加/删手动条目时也要把它们带着一起同步，否则备注名会被挤掉。
      */
-    fun sync(context: Context) {
+    fun sync(context: Context, entries: List<Item>? = null) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N_MR1) return   // ShortcutManager 从 7.1 起
+        if (entries != null) tabEntries = entries
         val sm = context.getSystemService(Context.SHORTCUT_SERVICE) as? ShortcutManager ?: return
-        val items = load(context)
+        val manual = load(context)
+        // 备注名排前面：那是用户张嘴说的词（「打开DNS浏览器乘车码」里的"乘车码"），最需要能被叫到
+        val wanted = tabEntries + manual
         val limit = sm.maxShortcutCountPerActivity.coerceAtLeast(1)
-        val use = items.take(limit)
-        if (items.size > use.size) {
-            Log.w(TAG, "快捷方式最多 ${limit} 条，只注册前 ${use.size} 条（再多的只在列表里）")
+        val use = wanted.take(limit)
+        if (wanted.size > use.size) {
+            Log.w(
+                TAG,
+                "快捷方式最多 ${limit} 条，只注册前 ${use.size} 条" +
+                    "（备注名 ${tabEntries.size} + 手动配置 ${manual.size}）"
+            )
         }
         val infos = use.mapIndexed { index, item ->
-            val intent = Intent(Intent.ACTION_VIEW, Uri.parse("$SCHEME://voice/${item.id}"), context, MainActivity::class.java)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            val intent = Intent(
+                Intent.ACTION_VIEW,
+                Uri.parse("$SCHEME://voice/" + Uri.encode(item.id)),
+                context, MainActivity::class.java
+            ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             ShortcutInfo.Builder(context, SHORTCUT_ID_PREFIX + item.id)
                 .setShortLabel(item.name)
                 .setLongLabel("${item.name} · ${hostOf(item.url)}")
@@ -142,11 +163,15 @@ object VoiceShortcuts {
         }
         try {
             sm.dynamicShortcuts = infos
-            Log.i(TAG, "语音快捷方式已同步：${use.joinToString("、") { it.name }}")
+            Log.i(TAG, "快捷方式已同步：${use.joinToString("、") { it.name }}")
         } catch (e: Exception) {
             Log.w(TAG, "注册快捷方式失败: ${e.message}")
         }
     }
+
+    /** 进程内缓存：标签页备注名那条同步时由 MainActivity 传进来（见 sync 的 entries 参数） */
+    @Volatile
+    private var tabEntries: List<Item> = emptyList()
 
     private fun hostOf(url: String): String = try {
         Uri.parse(url).host ?: url

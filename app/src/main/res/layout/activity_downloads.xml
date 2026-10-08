@@ -44,6 +44,50 @@
             android:visibility="gone" />
     </LinearLayout>
 
+
+    <!-- 批量选择模式的顶栏（长按任意一条进入）：退出 / 已选几项 / 全选 -->
+    <LinearLayout
+        android:id="@+id/selectionBar"
+        android:layout_width="match_parent"
+        android:layout_height="56dp"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingStart="4dp"
+        android:paddingEnd="12dp"
+        android:background="#EDE7F6"
+        android:visibility="gone">
+
+        <ImageButton
+            android:id="@+id/btnSelExit"
+            android:layout_width="44dp"
+            android:layout_height="44dp"
+            android:src="@drawable/ic_nav_close"
+            android:tint="@color/purple_500"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="退出批量选择" />
+
+        <TextView
+            android:id="@+id/tvSelCount"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="8dp"
+            android:text="已选 0 项"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            android:textColor="#202124" />
+
+        <TextView
+            android:id="@+id/btnSelectAll"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="全选"
+            android:textSize="14sp"
+            android:textColor="@color/purple_500"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:padding="8dp" />
+    </LinearLayout>
+
     <View
         android:layout_width="match_parent"
         android:layout_height="1dp"
@@ -92,4 +136,45 @@
                 android:textColor="#9AA0A6" />
         </LinearLayout>
     </FrameLayout>
+
+    <!-- 批量操作条：选中若干条后出现（重试只对失败的条目生效） -->
+    <LinearLayout
+        android:id="@+id/batchBar"
+        android:layout_width="match_parent"
+        android:layout_height="56dp"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:background="#F1F3F4"
+        android:visibility="gone">
+
+        <Button
+            android:id="@+id/btnBatchRetry"
+            style="?android:attr/borderlessButtonStyle"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:text="重试"
+            android:textSize="15sp"
+            android:textColor="@color/purple_500" />
+
+        <Button
+            android:id="@+id/btnBatchShare"
+            style="?android:attr/borderlessButtonStyle"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:text="分享"
+            android:textSize="15sp"
+            android:textColor="@color/purple_500" />
+
+        <Button
+            android:id="@+id/btnBatchDelete"
+            style="?android:attr/borderlessButtonStyle"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:text="删除"
+            android:textSize="15sp"
+            android:textColor="#D32F2F" />
+    </LinearLayout>
 </LinearLayout>

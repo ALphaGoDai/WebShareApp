@@ -64,6 +64,12 @@ class MainActivity : AppCompatActivity() {
     ) {
         /** 恢复出来的后台页第一次切过去才真正加载（也避免开 App 就并发拉满 6 个页面） */
         var pendingUrl: String? = null
+
+        /**
+         * 用户长按标签标题设置的备注名（空 = 没设）。它同时是语音快捷指令的名字：
+         * 「打开<应用名><备注名>」直接切到这一页，所以设了备注名的标签页会多出一条桌面快捷方式。
+         */
+        var alias: String? = null
     }
 
     private val tabs = mutableListOf<Tab>()
@@ -230,6 +236,8 @@ class MainActivity : AppCompatActivity() {
         // 系统 TTS：注入脚本里的 speechSynthesis 补丁靠它出声，早点初始化，页面一问就有嗓音
         TtsEngine.init(this)
 
+        maybeAskNotificationPermission()
+
         // 语音快捷指令同步成桌面快捷方式（设置里改了名字/网址，这里每次启动再对齐一次）
         VoiceShortcuts.sync(this)
 
@@ -315,24 +323,55 @@ class MainActivity : AppCompatActivity() {
         ownUiLaunchedAt = SystemClock.elapsedRealtime()
     }
 
+
+    /**
+     * Android 13+ 的通知权限：下载完成通知、网页自己的通知都靠它。第一次进 App 问一次
+     * （记在 prefs 里，用户拒了就不再追问——想开的话设置页有「系统通知设置」直接跳过去）。
+     */
+    private fun maybeAskNotificationPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED
+        ) return
+        val prefs = getSharedPreferences("webshare_notify", MODE_PRIVATE)
+        if (prefs.getBoolean("asked", false)) return
+        prefs.edit().putBoolean("asked", true).apply()
+        try {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        } catch (e: Exception) {
+            Log.w(TAG, "请求通知权限失败: ${e.message}")
+        }
+    }
+
     private fun handleIntent(intent: Intent?) {
         val action = intent?.action
 
         // 语音快捷方式 / 外部工具唤起：webshare://voice/<id> → 直达那条配置的页面
+        // （id 以 tab: 开头的是"标签页备注名"，直接切到那个标签页）
         val data = intent?.data
         if (action == Intent.ACTION_VIEW && data?.scheme == VoiceShortcuts.SCHEME) {
-            val item = data.lastPathSegment?.let { VoiceShortcuts.find(this, it) }
-            if (item != null) {
-                Log.i(TAG, "快捷方式唤起：「${item.name}」→ ${item.url}")
-                openUrlInTab(item.url)
-                return
+            val seg = data.lastPathSegment
+            if (seg != null && seg.startsWith(VoiceShortcuts.TAB_PREFIX)) {
+                val alias = seg.removePrefix(VoiceShortcuts.TAB_PREFIX)
+                Log.i(TAG, "快捷方式唤起：标签页备注「$alias」")
+                if (openAliasTab(alias)) return
+            } else {
+                val item = seg?.let { VoiceShortcuts.find(this, it) }
+                if (item != null) {
+                    Log.i(TAG, "快捷方式唤起：「${item.name}」→ ${item.url}")
+                    openUrlInTab(item.url)
+                    return
+                }
+                Log.w(TAG, "快捷方式找不到对应的配置: $data")
             }
-            Log.w(TAG, "快捷方式找不到对应的配置: $data")
         }
 
         // 语音助手（小艺 / 华为快捷指令）只会"打开应用"时，靠 referrer 认出它，直达设置里指定的那页
         // （桌面点开图标也是 MAIN 且没有 referrer → 正常开标签页，不受影响）
-        if ((action == null || action == Intent.ACTION_MAIN) && data == null && maybeVoiceAssistantJump()) return
+        if ((action == null || action == Intent.ACTION_MAIN) && data == null &&
+            intent?.getBooleanExtra(WebNotifications.EXTRA_FROM_NOTIFICATION, false) != true &&
+            maybeVoiceAssistantJump()
+        ) return
 
         if (action == Intent.ACTION_SEND || action == Intent.ACTION_SEND_MULTIPLE) {
             val type = intent.type ?: ""
@@ -383,6 +422,11 @@ class MainActivity : AppCompatActivity() {
         if (pkg.isEmpty() || !VoiceShortcuts.looksLikeAssistant(pkg)) return false
         val targetId = VoiceShortcuts.assistantTarget(this)
         if (targetId.isEmpty()) return false
+        if (targetId.startsWith(VoiceShortcuts.TAB_PREFIX)) {
+            val alias = targetId.removePrefix(VoiceShortcuts.TAB_PREFIX)
+            Log.i(TAG, "语音助手唤起，切到备注「$alias」的标签页")
+            return openAliasTab(alias)
+        }
         val item = VoiceShortcuts.find(this, targetId) ?: return false
         Log.i(TAG, "语音助手唤起，直达「${item.name}」${item.url}")
         openUrlInTab(item.url)
@@ -539,6 +583,7 @@ class MainActivity : AppCompatActivity() {
         val saved = TabStore.load(this)
         if (saved == null) {
             addTab()
+            syncVoiceShortcuts()
             return
         }
         for (s in saved.tabs) {
@@ -547,10 +592,85 @@ class MainActivity : AppCompatActivity() {
             configureWebView(wv, iface)
             val tab = Tab(iface, wv, s.title.ifBlank { getString(R.string.app_name) }, s.url, null)
             tab.pendingUrl = s.url
+            tab.alias = s.alias.takeIf { it.isNotEmpty() }
             tabs.add(tab)
         }
         currentIndex = saved.current
-        switchTo(currentIndex)   // 当前页立即按恢复的地址加载，后台页等第一次切过去再加载
+        switchTo(currentIndex)   // 当前页立即按恢复的地址加载，后台页等第一次切过去才加载
+        syncVoiceShortcuts()
+    }
+
+    /**
+     * 把各标签页的备注名同步成语音快捷方式（名字就是备注名，点了/说了就切到那一页）。
+     * 没有备注名的标签页不占快捷方式名额；名额满了由 VoiceShortcuts 按"备注名优先"截断。
+     */
+    private fun syncVoiceShortcuts() {
+        val entries = tabs.mapNotNull { t ->
+            val alias = t.alias?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            val url = t.url ?: t.pendingUrl ?: return@mapNotNull null
+            VoiceShortcuts.Item(VoiceShortcuts.TAB_PREFIX + alias, alias, url)
+        }
+        VoiceShortcuts.sync(this, entries)
+    }
+
+    /**
+     * 切到备注名为 alias 的标签页。标签页已经关掉/记录被清时，从落盘记录里找回它的网址新开一页，
+     * 找不到就提示一句（并告诉用户备注名是在哪儿设的）。
+     */
+    private fun openAliasTab(alias: String): Boolean {
+        val idx = tabs.indexOfFirst { it.alias == alias }
+        if (idx >= 0) {
+            switchTo(idx)
+            return true
+        }
+        val saved = TabStore.load(this)?.tabs?.firstOrNull { it.alias == alias }
+        if (saved != null) {
+            val tab = addTab()
+            tab.alias = alias
+            tab.url = saved.url
+            tab.webView.loadUrl(saved.url)
+            syncVoiceShortcuts()
+            return true
+        }
+        Toast.makeText(
+            this,
+            "没有备注为「$alias」的标签页——长按标签标题栏可以设备注名",
+            Toast.LENGTH_LONG
+        ).show()
+        return false
+    }
+
+    /** 长按标签卡片标题栏：设/改/清这个标签页的备注名（留空确定 = 恢复原名） */
+    private fun editTabAlias(index: Int) {
+        val tab = tabs.getOrNull(index) ?: return
+        val input = EditText(this)
+        input.setSingleLine(true)
+        input.setText(tab.alias ?: "")
+        input.hint = "备注名，留空恢复原名"
+        val current = tab.alias?.takeIf { it.isNotBlank() } ?: tab.title.ifBlank { "新标签页" }
+        AlertDialog.Builder(this)
+            .setTitle("标签页备注名")
+            .setMessage(
+                "给「$current」起个别名（例如「乘车码」）。设好之后：对小艺说「打开" +
+                    getString(R.string.app_name) + "」＋这个别名，就直接进这一页；" +
+                    "长按桌面图标也能看到这条快捷方式。留空确定＝恢复原来的标题。"
+            )
+            .setView(input)
+            .setPositiveButton("确定") { _, _ ->
+                val v = input.text.toString().trim()
+                tab.alias = v.ifEmpty { null }
+                persistTabs()
+                syncVoiceShortcuts()
+                tabAdapter.notifyItemChanged(index)
+                Toast.makeText(
+                    this,
+                    if (v.isEmpty()) "已恢复原名"
+                    else "备注名：$v（桌面快捷方式已更新，可对小艺说「${getString(R.string.app_name)}$v」）",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+            .setNegativeButton("取消", null)
+            .show()
     }
 
     /** 新建一个标签页（建好即成为当前页）；起始地址由调用方决定 */
@@ -1138,7 +1258,7 @@ class MainActivity : AppCompatActivity() {
         for ((i, tab) in tabs.withIndex()) {
             val raw = tab.url ?: tab.pendingUrl ?: continue
             if (i == currentIndex) savedCurrent = saved.size
-            saved.add(TabStore.SavedTab(withoutSharedParam(raw), tab.title))
+            saved.add(TabStore.SavedTab(withoutSharedParam(raw), tab.title, tab.alias ?: ""))
         }
         if (saved.isNotEmpty() && savedCurrent >= 0) {
             TabStore.save(this, saved, savedCurrent, commit)
@@ -1314,7 +1434,9 @@ class MainActivity : AppCompatActivity() {
 
         override fun onBindViewHolder(holder: TabVH, position: Int) {
             val tab = tabs[position]
-            holder.title.text = tab.title.ifBlank { "新标签页" }
+            // 有备注名就显示备注名（备注名同时是语音快捷键的名字，按用户自己的叫法显示更好认）
+            holder.title.text = tab.alias?.takeIf { it.isNotBlank() }
+                ?: tab.title.ifBlank { "新标签页" }
             if (tab.thumb != null) {
                 holder.thumb.setImageBitmap(tab.thumb)
             } else {
@@ -1322,10 +1444,15 @@ class MainActivity : AppCompatActivity() {
             }
             holder.close.setOnClickListener { closeTab(position) }
             holder.itemView.setOnClickListener { switchTo(position) }
+            holder.header.setOnLongClickListener {
+                editTabAlias(position)
+                true
+            }
         }
     }
 
     private class TabVH(view: View) : RecyclerView.ViewHolder(view) {
+        val header: View = view.findViewById(R.id.tabHeader)
         val title: TextView = view.findViewById(R.id.tabTitle)
         val thumb: ImageView = view.findViewById(R.id.tabThumb)
         val close: ImageButton = view.findViewById(R.id.tabClose)

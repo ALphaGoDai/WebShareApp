@@ -148,6 +148,19 @@ class WebAppInterface(private val context: Context) {
     fun mediaCaps(): String = MediaCaps.json()
 
     /**
+     * 网页 `new Notification(title, {body})` 转过来的一条系统通知（见 assets/shim.js 的
+     * installNotifications）。WebView 自己没有网页通知，所以由 App 代发。
+     */
+    @JavascriptInterface
+    fun notify(title: String, body: String, source: String) {
+        WebNotifications.post(context, title, body, source)
+    }
+
+    /** 网页问「通知能不能用」（当前权限状态），用不上也留着，方便页面自己决定要不要提示用户 */
+    @JavascriptInterface
+    fun notifyAllowed(): Boolean = WebNotifications.canPost(context)
+
+    /**
      * 语音合成（Android WebView 不实现 Web Speech API，window.speechSynthesis 整个不存在）。
      * 注入脚本里的 speechSynthesis 补丁把 speak() 转到这里，播完/失败回调那个页面的
      * window.__webshareTtsDone(id, err)。

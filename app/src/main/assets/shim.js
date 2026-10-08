@@ -798,4 +798,56 @@
     }
     refreshVoices();
   })();
+
+  // ---------- 系统通知：网页 Notification → App 的系统通知 ----------
+  // Android WebView 不实现网页通知：window.Notification 对象在，但 requestPermission
+  // 永远拿不到权限、new Notification 什么都不弹，页面里的"提醒你一下"就静默消失了。
+  // 这里把它接到 App 的原生通知上（Android.notify → 系统通知栏），页面代码不用改。
+  (function installNotifications() {
+    if (window.__wsNotifyInstalled) return;
+    if (!bridge.notify) return;
+    function Notify(title, options) {
+      options = options || {};
+      this.title = String(title == null ? '' : title);
+      this.body = String(options.body == null ? '' : options.body);
+      this.tag = String(options.tag == null ? '' : options.tag);
+      this.onclick = null;
+      this.onclose = null;
+      this.onshow = null;
+      this.onerror = null;
+      var self = this;
+      try {
+        bridge.notify(self.title, self.body, String(location.host || ''));
+      } catch (e) {}
+      // onshow 在浏览器里是异步派的，页面常拿它当"已经发出去了"的信号
+      setTimeout(function () {
+        if (typeof self.onshow === 'function') {
+          try { self.onshow({ type: 'show' }); } catch (e) {}
+        }
+      }, 0);
+      this.close = function () {};
+      this.addEventListener = function (type, fn) {
+        if (type === 'show') self.onshow = fn;
+        else if (type === 'click') self.onclick = fn;
+        else if (type === 'close') self.onclose = fn;
+        else if (type === 'error') self.onerror = fn;
+      };
+      this.removeEventListener = function () {};
+    }
+    Notify.permission = 'granted';
+    Notify.maxActions = 0;
+    Notify.requestPermission = function (cb) {
+      if (typeof cb === 'function') { try { cb('granted'); } catch (e) {} }
+      return Promise.resolve('granted');
+    };
+    try {
+      Object.defineProperty(window, 'Notification', {
+        value: Notify, configurable: true, writable: true
+      });
+    } catch (e) {
+      try { window.Notification = Notify; } catch (e2) {}
+    }
+    window.__wsNotifyInstalled = true;
+  })();
+
 })();

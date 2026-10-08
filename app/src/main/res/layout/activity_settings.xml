@@ -84,134 +84,29 @@
                     android:layout_marginTop="16dp"
                     android:visibility="gone">
 
+                    <!-- 可编辑下拉框：点一下弹出常用 DNS（DoH 与 UDP 都在里头），也能直接手输别的地址 -->
                     <com.google.android.material.textfield.TextInputLayout
                         style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:hint="DoH 地址 或 DNS 服务器 IP">
+                        android:hint="DoH 地址 或 DNS 服务器 IP"
+                        app:endIconMode="dropdown_menu">
 
-                        <com.google.android.material.textfield.TextInputEditText
+                        <AutoCompleteTextView
                             android:id="@+id/etDohUrl"
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
+                            android:completionThreshold="0"
                             android:inputType="textUri" />
                     </com.google.android.material.textfield.TextInputLayout>
 
                     <TextView
-                        android:layout_width="wrap_content"
+                        android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:layout_marginTop="12dp"
-                        android:text="DoH 服务器 (加密, https:// 开头)："
+                        android:layout_marginTop="8dp"
+                        android:text="点一下输入框会列出常用的 DoH（加密，https:// 开头）和 UDP DNS（直连，填 IP），选中即填入；也支持直接手输。"
                         android:textSize="12sp"
-                        android:textColor="?android:attr/textColorSecondary"
-                        android:textStyle="bold" />
-
-                    <TextView
-                        android:id="@+id/tvDnsPod"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="4dp"
-                        android:text="DNSPod: https://doh.pub/dns-query"
-                        android:textSize="13sp"
-                        android:textColor="@color/purple_500"
-                        android:padding="8dp"
-                        android:clickable="true"
-                        android:focusable="true"
-                        android:background="?android:attr/selectableItemBackground" />
-
-                    <TextView
-                        android:id="@+id/tvCloudflareDns"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:text="Cloudflare: https://cloudflare-dns.com/dns-query"
-                        android:textSize="13sp"
-                        android:textColor="@color/purple_500"
-                        android:padding="8dp"
-                        android:clickable="true"
-                        android:focusable="true"
-                        android:background="?android:attr/selectableItemBackground" />
-
-                    <TextView
-                        android:id="@+id/tvAliDns"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:text="阿里 DNS: https://dns.alidns.com/dns-query"
-                        android:textSize="13sp"
-                        android:textColor="@color/purple_500"
-                        android:padding="8dp"
-                        android:clickable="true"
-                        android:focusable="true"
-                        android:background="?android:attr/selectableItemBackground" />
-
-                    <TextView
-                        android:id="@+id/tvGoogleDns"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:text="Google: https://dns.google/dns-query"
-                        android:textSize="13sp"
-                        android:textColor="@color/purple_500"
-                        android:padding="8dp"
-                        android:clickable="true"
-                        android:focusable="true"
-                        android:background="?android:attr/selectableItemBackground" />
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="12dp"
-                        android:text="UDP DNS 服务器 (直连, 填 IP)："
-                        android:textSize="12sp"
-                        android:textColor="?android:attr/textColorSecondary"
-                        android:textStyle="bold" />
-
-                    <TextView
-                        android:id="@+id/tvHuaweiDns"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="4dp"
-                        android:text="华为 DNS: 117.50.11.11"
-                        android:textSize="13sp"
-                        android:textColor="@color/purple_500"
-                        android:padding="8dp"
-                        android:clickable="true"
-                        android:focusable="true"
-                        android:background="?android:attr/selectableItemBackground" />
-
-                    <TextView
-                        android:id="@+id/tvDnsPodUdp"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:text="DNSPod: 119.29.29.29"
-                        android:textSize="13sp"
-                        android:textColor="@color/purple_500"
-                        android:padding="8dp"
-                        android:clickable="true"
-                        android:focusable="true"
-                        android:background="?android:attr/selectableItemBackground" />
-
-                    <TextView
-                        android:id="@+id/tvAliUdp"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:text="阿里 DNS: 223.5.5.5"
-                        android:textSize="13sp"
-                        android:textColor="@color/purple_500"
-                        android:padding="8dp"
-                        android:clickable="true"
-                        android:focusable="true"
-                        android:background="?android:attr/selectableItemBackground" />
-
-                    <TextView
-                        android:id="@+id/tvGoogleUdp"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:text="Google: 8.8.8.8"
-                        android:textSize="13sp"
-                        android:textColor="@color/purple_500"
-                        android:padding="8dp"
-                        android:clickable="true"
-                        android:focusable="true"
-                        android:background="?android:attr/selectableItemBackground" />
+                        android:textColor="?android:attr/textColorSecondary" />
 
                 </LinearLayout>
 
@@ -382,6 +277,22 @@
                     android:layout_height="wrap_content"
                     android:layout_marginTop="4dp"
                     android:text="登录状态（Cookie）会一直记着，重启 App、被系统清后台都不用重新登录；只有点上面这个按钮才会清掉。"
+                    android:textSize="11sp"
+                    android:textColor="?android:attr/textColorSecondary" />
+
+                <Button
+                    android:id="@+id/btnNotifySettings"
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:layout_marginTop="16dp"
+                    android:text="系统通知设置"
+                    android:textSize="14sp" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="下载进度/完成、以及网页自己发的通知（new Notification）都会走系统通知栏；第一次进 App 会问一次通知权限。收不到通知时点上面这个按钮去系统里检查。"
                     android:textSize="11sp"
                     android:textColor="?android:attr/textColorSecondary" />
 

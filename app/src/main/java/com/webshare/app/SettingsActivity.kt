@@ -1,12 +1,16 @@
 package com.webshare.app
 
+import android.content.Context
 import android.content.Intent
 import android.graphics.Typeface
 import android.net.Uri
 import android.os.Bundle
 import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
+import android.widget.ArrayAdapter
 import android.widget.Button
+import android.widget.Filter
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Switch
@@ -20,7 +24,7 @@ class SettingsActivity : AppCompatActivity() {
 
     private lateinit var settingsManager: SettingsManager
     private lateinit var switchDoh: Switch
-    private lateinit var etDohUrl: TextInputEditText
+    private lateinit var etDohUrl: android.widget.AutoCompleteTextView
     private lateinit var layoutDohUrl: View
     private lateinit var etUpdateUrl: TextInputEditText
     private lateinit var btnUpdate: Button
@@ -49,6 +53,8 @@ class SettingsActivity : AppCompatActivity() {
         findViewById<android.widget.ImageButton>(R.id.btnBack).setOnClickListener {
             finish()
         }
+
+        setupDohDropdown()
 
         switchDoh.isChecked = settingsManager.dohEnabled
         etDohUrl.setText(settingsManager.dohUrl)
@@ -108,32 +114,67 @@ class SettingsActivity : AppCompatActivity() {
             finish()
         }
 
-        // DoH servers
-        findViewById<TextView>(R.id.tvGoogleDns)?.setOnClickListener {
-            etDohUrl.setText("https://dns.google/dns-query")
-        }
-        findViewById<TextView>(R.id.tvCloudflareDns)?.setOnClickListener {
-            etDohUrl.setText("https://cloudflare-dns.com/dns-query")
-        }
-        findViewById<TextView>(R.id.tvAliDns)?.setOnClickListener {
-            etDohUrl.setText("https://dns.alidns.com/dns-query")
-        }
-        findViewById<TextView>(R.id.tvDnsPod)?.setOnClickListener {
-            etDohUrl.setText("https://doh.pub/dns-query")
+    }
+
+    /**
+     * 自定义 DNS 输入框 = 可编辑下拉框：点一下列出常用 DoH 与 UDP DNS，选中即填入；
+     * 也支持直接手输别的地址（列表只是省手打，不限制取值）。
+     */
+    private fun setupDohDropdown() {
+        val options = listOf(
+            DnsOption("DNSPod（腾讯，DoH 加密）", "https://doh.pub/dns-query"),
+            DnsOption("阿里云（DoH 加密）", "https://dns.alidns.com/dns-query"),
+            DnsOption("Cloudflare（DoH 加密）", "https://cloudflare-dns.com/dns-query"),
+            DnsOption("Google（DoH 加密，国内通常连不上）", "https://dns.google/dns-query"),
+            DnsOption("Quad9（DoH 加密）", "https://dns.quad9.net/dns-query"),
+            DnsOption("360 安全（DoH 加密）", "https://doh.360.cn/dns-query"),
+            DnsOption("DNSPod（UDP 直连）", "119.29.29.29"),
+            DnsOption("阿里（UDP 直连）", "223.5.5.5"),
+            DnsOption("华为（UDP 直连）", "117.50.11.11"),
+            DnsOption("Google（UDP 直连，国内通常连不上）", "8.8.8.8")
+        )
+        etDohUrl.setAdapter(DnsAdapter(this, options))
+        etDohUrl.threshold = 0                      // 一有焦点就弹整张表，不必先打字
+        etDohUrl.setOnClickListener { etDohUrl.showDropDown() }
+    }
+
+    /** 下拉里的一条：显示 label（好认），选中后填进输入框的是 value（真正能用的地址） */
+    private class DnsOption(val label: String, val value: String) {
+        override fun toString(): String = value
+    }
+
+    /** 按「标签或地址包含输入内容」筛，选中后填进输入框的是 value */
+    private inner class DnsAdapter(context: Context, private val options: List<DnsOption>) :
+        ArrayAdapter<DnsOption>(context, android.R.layout.simple_list_item_1, ArrayList(options)) {
+
+        override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+            val tv = super.getView(position, convertView, parent) as TextView
+            tv.text = getItem(position)?.label ?: ""
+            tv.textSize = 13f
+            return tv
         }
 
-        // UDP DNS servers
-        findViewById<TextView>(R.id.tvDnsPodUdp)?.setOnClickListener {
-            etDohUrl.setText("119.29.29.29")
-        }
-        findViewById<TextView>(R.id.tvAliUdp)?.setOnClickListener {
-            etDohUrl.setText("223.5.5.5")
-        }
-        findViewById<TextView>(R.id.tvHuaweiDns)?.setOnClickListener {
-            etDohUrl.setText("117.50.11.11")
-        }
-        findViewById<TextView>(R.id.tvGoogleUdp)?.setOnClickListener {
-            etDohUrl.setText("8.8.8.8")
+        override fun getFilter(): Filter = object : Filter() {
+            override fun performFiltering(constraint: CharSequence?): FilterResults {
+                val q = constraint?.toString()?.trim()?.lowercase().orEmpty()
+                // 输入框里已经是某个已知地址（用户还没动过它）时，点开要看到整张表，
+                // 否则会被当成筛选词只剩一条；真打了字才过滤
+                val untouched = options.any { it.value.lowercase() == q }
+                val list = if (q.isEmpty() || untouched) options else options.filter {
+                    it.label.lowercase().contains(q) || it.value.lowercase().contains(q)
+                }
+                return FilterResults().apply {
+                    values = list
+                    count = list.size
+                }
+            }
+
+            @Suppress("UNCHECKED_CAST")
+            override fun publishResults(constraint: CharSequence?, results: FilterResults) {
+                clear()
+                addAll(results.values as List<DnsOption>)
+                notifyDataSetChanged()
+            }
         }
     }
 
@@ -143,6 +184,9 @@ class SettingsActivity : AppCompatActivity() {
         findViewById<Button>(R.id.btnVoiceAdd).setOnClickListener { addVoiceShortcut() }
         findViewById<Button>(R.id.btnVoiceTarget).setOnClickListener { chooseVoiceTarget() }
         findViewById<Button>(R.id.btnClearCookies).setOnClickListener { confirmClearCookies() }
+        findViewById<Button>(R.id.btnNotifySettings).setOnClickListener {
+            WebNotifications.openSystemSettings(this)
+        }
         refreshVoiceUi()
     }
 
@@ -224,19 +268,29 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     private fun chooseVoiceTarget() {
-        val items = VoiceShortcuts.load(this)
-        if (items.isEmpty()) {
-            snack("先加一条语音快捷指令")
+        // 候选 = 标签页备注名（长按标签标题设的）+ 手动配的语音快捷指令：
+        // 助手只把 App 打开、带不出参数时，也能直达备注名那一页
+        val aliases = TabStore.load(this)?.tabs.orEmpty()
+            .filter { it.alias.isNotEmpty() }
+            .map {
+                VoiceShortcuts.Item(
+                    VoiceShortcuts.TAB_PREFIX + it.alias, "标签页「${it.alias}」", it.url
+                )
+            }
+            .distinctBy { it.id }
+        val all = aliases + VoiceShortcuts.load(this)
+        if (all.isEmpty()) {
+            snack("先给某个标签页设备注名（长按标签标题），或加一条语音快捷指令")
             return
         }
         val names = mutableListOf("不特别进入（正常开标签页）")
-        names.addAll(items.map { "${it.name}（${it.url}）" })
+        names.addAll(all.map { "${it.name}（${it.url}）" })
         val currentId = VoiceShortcuts.assistantTarget(this)
-        val checked = items.indexOfFirst { it.id == currentId } + 1   // 0 = 不特别进入
+        val checked = all.indexOfFirst { it.id == currentId } + 1   // 0 = 不特别进入
         AlertDialog.Builder(this)
             .setTitle("语音助手打开 App 时")
             .setSingleChoiceItems(names.toTypedArray(), checked) { dialog, which ->
-                VoiceShortcuts.setAssistantTarget(this, if (which == 0) "" else items[which - 1].id)
+                VoiceShortcuts.setAssistantTarget(this, if (which == 0) "" else all[which - 1].id)
                 dialog.dismiss()
                 refreshVoiceUi()
             }

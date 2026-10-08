@@ -8,7 +8,9 @@
     android:clipToOutline="true"
     android:elevation="3dp">
 
+    <!-- 长按这条标题栏＝给标签页设备注名（备注名同时是语音说的那个词，见 MainActivity.editTabAlias） -->
     <FrameLayout
+        android:id="@+id/tabHeader"
         android:layout_width="match_parent"
         android:layout_height="34dp"
         android:background="#E8EAED">

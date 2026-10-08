@@ -9,6 +9,7 @@ import android.provider.DocumentsContract
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.Button
 import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.ProgressBar
@@ -38,6 +39,25 @@ class DownloadsActivity : AppCompatActivity() {
     private var lastSignature = ""
     private var reloading = false
 
+    // ---------- 批量选择 ----------
+    private lateinit var selectionBar: View
+    private lateinit var batchBar: View
+    private lateinit var selCount: TextView
+    private lateinit var selectAllButton: TextView
+    private lateinit var batchRetryButton: Button
+    private lateinit var batchShareButton: Button
+    private lateinit var batchDeleteButton: Button
+
+    /** 选择模式（长按任意一条进入）；选中的是下载记录的 id（DownloadRecord.id 是 Long） */
+    private var selectionMode = false
+    private val selected = linkedSetOf<Long>()
+
+    /** 当前列表快照：批量操作按它取记录（轮询刷新时更新） */
+    private var currentItems: List<DownloadRecord> = emptyList()
+
+    /** 上一次推给列表的选择状态，用来避免每轮轮询都重绑一遍 */
+    private var selectionSignature = ""
+
     private val pollRunner = object : Runnable {
         override fun run() {
             reload()
@@ -54,6 +74,19 @@ class DownloadsActivity : AppCompatActivity() {
         clearButton = findViewById(R.id.btnClear)
         clearButton.setOnClickListener { askClearAll() }
         emptyView = findViewById(R.id.emptyView)
+
+        selectionBar = findViewById(R.id.selectionBar)
+        batchBar = findViewById(R.id.batchBar)
+        selCount = findViewById(R.id.tvSelCount)
+        selectAllButton = findViewById(R.id.btnSelectAll)
+        batchRetryButton = findViewById(R.id.btnBatchRetry)
+        batchShareButton = findViewById(R.id.btnBatchShare)
+        batchDeleteButton = findViewById(R.id.btnBatchDelete)
+        findViewById<ImageButton>(R.id.btnSelExit).setOnClickListener { exitSelection() }
+        selectAllButton.setOnClickListener { toggleSelectAll() }
+        batchRetryButton.setOnClickListener { batchRetry() }
+        batchShareButton.setOnClickListener { batchShare() }
+        batchDeleteButton.setOnClickListener { batchDelete() }
 
         adapter = Adapter()
         val list = findViewById<RecyclerView>(R.id.list)
@@ -86,8 +119,13 @@ class DownloadsActivity : AppCompatActivity() {
 
     private fun show(items: List<DownloadRecord>) {
         adapter.submit(items)
+        currentItems = items
+        // 记录被清掉/消失了，选择里也跟着去掉，别让"已选 N 项"里混着不存在的东西
+        val ids = items.map { it.id }.toSet()
+        selected.retainAll(ids)
+        if (selected.isEmpty() && selectionMode) selectionMode = false
         emptyView.visibility = if (items.isEmpty()) View.VISIBLE else View.GONE
-        clearButton.visibility = if (items.isEmpty()) View.GONE else View.VISIBLE
+        updateSelectionUi()
         val signature = items.joinToString("|") {
             "${it.id}:${it.status}:${it.received}:${it.total}:${it.size}:${it.savedName}"
         }
@@ -191,10 +229,160 @@ class DownloadsActivity : AppCompatActivity() {
             .show()
     }
 
+    // ---------- 批量选择与批量操作 ----------
+
+    private fun enterSelection(id: Long) {
+        selectionMode = true
+        selected.clear()
+        selected.add(id)
+        updateSelectionUi()
+    }
+
+    private fun exitSelection() {
+        selectionMode = false
+        selected.clear()
+        updateSelectionUi()
+    }
+
+    private fun toggleSelection(id: Long) {
+        if (!selected.remove(id)) selected.add(id)
+        if (selected.isEmpty()) selectionMode = false
+        updateSelectionUi()
+    }
+
+    private fun toggleSelectAll() {
+        val allPicked = currentItems.isNotEmpty() && currentItems.all { selected.contains(it.id) }
+        selected.clear()
+        if (!allPicked) currentItems.forEach { selected.add(it.id) }
+        if (selected.isEmpty()) selectionMode = false
+        updateSelectionUi()
+    }
+
+    /** 选择模式的界面状态：顶栏（已选几项/全选）、底栏按钮可用性、清空按钮的显示 */
+    private fun updateSelectionUi() {
+        selectionBar.visibility = if (selectionMode) View.VISIBLE else View.GONE
+        batchBar.visibility = if (selectionMode) View.VISIBLE else View.GONE
+        clearButton.visibility =
+            if (selectionMode || currentItems.isEmpty()) View.GONE else View.VISIBLE
+        if (selectionMode) {
+            val picked = currentItems.filter { selected.contains(it.id) }
+            selCount.text = "已选 ${picked.size} 项"
+            val allPicked = currentItems.isNotEmpty() && picked.size == currentItems.size
+            selectAllButton.text = if (allPicked) "取消全选" else "全选"
+            setEnabled(batchRetryButton, picked.any { it.status == DownloadRecord.STATUS_FAILED })
+            setEnabled(batchShareButton, picked.any { it.savedUri != null })
+            setEnabled(batchDeleteButton, picked.isNotEmpty())
+        }
+        adapter.selectionMode = selectionMode
+        // 800ms 轮询每一轮都会走到这里；选择状态没变就别整体重绑
+        val sig = selectionMode.toString() + "|" + selected.joinToString(",")
+        if (sig != selectionSignature) {
+            selectionSignature = sig
+            adapter.notifyDataSetChanged()
+        }
+    }
+
+    private fun setEnabled(button: Button, enabled: Boolean) {
+        button.isEnabled = enabled
+        button.alpha = if (enabled) 1f else 0.4f
+    }
+
+    /** 批量重试：只对失败的条目生效（进行中/已完成的不动） */
+    private fun batchRetry() {
+        val picked = currentItems.filter {
+            selected.contains(it.id) && it.status == DownloadRecord.STATUS_FAILED
+        }
+        if (picked.isEmpty()) {
+            Toast.makeText(this, "选中的条目里没有下载失败的", Toast.LENGTH_SHORT).show()
+            return
+        }
+        for (rec in picked) {
+            history.remove(rec.id)
+            DownloadService.start(
+                context = this,
+                url = rec.url,
+                name = rec.name,
+                mime = rec.mime,
+                treeUri = rec.treeUri,
+                referer = rec.referer
+            )
+        }
+        Toast.makeText(this, "已重新开始 ${picked.size} 个下载", Toast.LENGTH_SHORT).show()
+        exitSelection()
+        reload()
+    }
+
+    /** 批量分享：把选中且已存到手机的文件一次性交给系统分享 */
+    private fun batchShare() {
+        val picked = currentItems.filter { selected.contains(it.id) && it.savedUri != null }
+        if (picked.isEmpty()) {
+            Toast.makeText(this, "选中的条目里没有已保存的文件", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val uris = ArrayList(picked.map { Uri.parse(it.savedUri) })
+        val mime = picked.first().mime.ifEmpty { "*/*" }
+        val intent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+            type = if (picked.all { it.mime == mime }) mime else "*/*"
+            putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        try {
+            startActivity(Intent.createChooser(intent, "分享 ${uris.size} 个文件"))
+        } catch (e: Exception) {
+            Toast.makeText(this, "没有应用能接收这些文件", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /** 批量删除：文件+记录 / 仅记录，两种都先问一次 */
+    private fun batchDelete() {
+        val picked = currentItems.filter { selected.contains(it.id) }
+        if (picked.isEmpty()) return
+        val withFile = picked.count { it.savedUri != null }
+        AlertDialog.Builder(this)
+            .setTitle("删除选中的 ${picked.size} 项？")
+            .setMessage(
+                if (withFile > 0) "其中 $withFile 个已经存到手机里了（删掉的文件不可恢复）。"
+                else "选中的都还没存到手机里，只会移除这些记录。"
+            )
+            .setPositiveButton("删除文件并移除记录") { _, _ -> deletePicked(picked, true) }
+            .setNeutralButton("仅移除记录") { _, _ -> deletePicked(picked, false) }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun deletePicked(picked: List<DownloadRecord>, deleteFiles: Boolean) {
+        var files = 0
+        for (rec in picked) {
+            if (deleteFiles && rec.savedUri != null && deleteSavedFile(rec.savedUri)) files++
+            history.remove(rec.id)
+        }
+        exitSelection()
+        reload()
+        Toast.makeText(
+            this,
+            if (deleteFiles) "已删除 ${picked.size} 项（文件 $files 个）"
+            else "已移除 ${picked.size} 条记录",
+            Toast.LENGTH_SHORT
+        ).show()
+    }
+
+    /** 选择模式下按返回＝先退出选择，不直接离开这一页 */
+    @Suppress("DEPRECATION")
+    override fun onBackPressed() {
+        if (selectionMode) {
+            exitSelection()
+            return
+        }
+        super.onBackPressed()
+    }
+
     // ---------- 列表 ----------
 
     private inner class Adapter : RecyclerView.Adapter<VH>() {
         private val items = mutableListOf<DownloadRecord>()
+
+        /** 是否处于批量选择模式（决定显示勾选框、藏掉单条按钮） */
+        var selectionMode = false
         private val dateFmt = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault())
 
         fun submit(newItems: List<DownloadRecord>) {
@@ -214,6 +402,10 @@ class DownloadsActivity : AppCompatActivity() {
             val rec = items[position]
             holder.icon.setImageResource(iconFor(rec))
             holder.title.text = rec.displayName
+
+            val picked = selectionMode && selected.contains(rec.id)
+            holder.check.visibility = if (selectionMode) View.VISIBLE else View.GONE
+            holder.check.alpha = if (picked) 1f else 0.3f
 
             val date = dateFmt.format(Date(rec.startedAt))
             when (rec.status) {
@@ -256,10 +448,24 @@ class DownloadsActivity : AppCompatActivity() {
             }
 
             holder.itemView.setOnClickListener {
-                if (rec.status == DownloadRecord.STATUS_DONE) open(rec)
+                when {
+                    selectionMode -> toggleSelection(rec.id)
+                    rec.status == DownloadRecord.STATUS_DONE -> open(rec)
+                }
+            }
+            holder.itemView.setOnLongClickListener {
+                if (selectionMode) toggleSelection(rec.id) else enterSelection(rec.id)
+                true
             }
             holder.retry.setOnClickListener { retry(rec) }
             holder.delete.setOnClickListener { askDelete(rec) }
+            // 选择模式下把单条操作收起来，免得一边勾选一边误删
+            if (selectionMode) {
+                holder.retry.visibility = View.GONE
+                holder.delete.visibility = View.GONE
+            } else {
+                holder.delete.visibility = View.VISIBLE
+            }
         }
 
         private fun iconFor(rec: DownloadRecord): Int {
@@ -285,6 +491,7 @@ class DownloadsActivity : AppCompatActivity() {
         val title: TextView = view.findViewById(R.id.title)
         val subtitle: TextView = view.findViewById(R.id.subtitle)
         val progress: ProgressBar = view.findViewById(R.id.progress)
+        val check: ImageView = view.findViewById(R.id.checkMark)
         val retry: ImageButton = view.findViewById(R.id.btnRetry)
         val delete: ImageButton = view.findViewById(R.id.btnDelete)
     }
