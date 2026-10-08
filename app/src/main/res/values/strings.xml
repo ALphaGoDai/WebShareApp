@@ -1,5 +1,6 @@
 <resources>
-    <string name="app_name">网页分享助手</string>
+    <!-- 启动器/分享/最近任务上显示的名字，也是界面里默认的标签页标题 -->
+    <string name="app_name">DNS浏览器</string>
     <string name="settings_title">设置</string>
     <string name="downloads_title">已下载</string>
     <string name="tabs_title">标签页</string>
