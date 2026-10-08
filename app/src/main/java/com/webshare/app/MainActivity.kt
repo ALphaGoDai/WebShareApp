@@ -1444,6 +1444,9 @@ class MainActivity : AppCompatActivity() {
             }
             holder.close.setOnClickListener { closeTab(position) }
             holder.itemView.setOnClickListener { switchTo(position) }
+            // 标题栏：点一下和点卡片一样是切换；长按才是起备注名
+            // （挂了长按监听会让这个 View 变成可点击，不补上点击监听的话点标题就没反应了）
+            holder.header.setOnClickListener { switchTo(position) }
             holder.header.setOnLongClickListener {
                 editTabAlias(position)
                 true
