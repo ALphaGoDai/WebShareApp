@@ -36,10 +36,12 @@ open class DohWebViewClient(
     /** 向用户提示修复结果（在拦截线程回调，调用方自己切主线程） */
     private val onNotice: ((String) -> Unit)? = null,
     /**
-     * 网页要打开别的 App（douban:// 、intent://…）：交回界面弹提示条，而不是偷偷 startActivity。
+     * 网页要打开别的 App（douban:// 、intent://…）：交回界面处理。
+     * 第二个参数 direct=true 表示「用户主动点的、而且是我们认识的 App scheme」——
+     * 这种别再弹「此网站请求打开 App」那条确认（用户嫌一次点击要按两次），直接交给系统去开。
      * 为 null 时退回"直接开一次"的老行为。
      */
-    private val onOpenExternalApp: ((String) -> Unit)? = null
+    private val onOpenExternalApp: ((String, Boolean) -> Unit)? = null
 ) : WebViewClient() {
 
     private val dnsResolver: DohDnsResolver? = if (dohEnabled && dohUrl.isNotEmpty()) {
@@ -768,14 +770,16 @@ open class DohWebViewClient(
 
         // 页面脚本可能在背后乱跳各种 scheme（统计、拉活），只认"用户点出来的"
         // 和我们认识的 scheme，别弹一堆莫名其妙的条
-        if (!request.hasGesture() && !ExternalApp.isKnownScheme(url.toString())) {
+        val known = ExternalApp.isKnownScheme(url.toString())
+        if (!request.hasGesture() && !known) {
             Log.i(TAG, "忽略脚本跳转的 scheme: $url")
             return true
         }
 
-        val prompt = onOpenExternalApp
-        if (prompt != null) {
-            prompt(url.toString())   // 交回界面弹「此网站请求打开 App」提示条
+        val handler = onOpenExternalApp
+        if (handler != null) {
+            // 用户点的、又认识（douban:// 之类）→ 直接开；不认识或脚本跳的才弹提示条
+            handler(url.toString(), request.hasGesture() && known)
             return true
         }
         try {

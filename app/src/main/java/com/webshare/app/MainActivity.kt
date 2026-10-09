@@ -939,7 +939,9 @@ class MainActivity : AppCompatActivity() {
             onNotice = { note ->
                 runOnUiThread { Toast.makeText(activityContext, note, Toast.LENGTH_LONG).show() }
             },
-            onOpenExternalApp = { url -> runOnUiThread { promptOpenApp(url) } }
+            onOpenExternalApp = { url, direct ->
+                runOnUiThread { if (direct) openAppDirect(url) else promptOpenApp(url) }
+            }
         ) {
             override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
                 super.onPageStarted(view, url, favicon)
@@ -1004,6 +1006,26 @@ class MainActivity : AppCompatActivity() {
         }
         openAppBar.visibility = View.VISIBLE
         Log.i(TAG, "网页请求打开 App：$url → ${target.label}（图标=${target.icon != null}）")
+    }
+
+    /**
+     * 用户主动点了一个我们认识的 App scheme（douban:// 之类）：不弹确认条，直接交给系统。
+     * 系统自己会弹「选择打开方式」（装了多个或需要确认时），手机上没装则是那句 toast。
+     */
+    private fun openAppDirect(url: String) {
+        val target = ExternalApp.resolve(this, url)
+        if (target == null) { promptOpenApp(url); return }   // 解析不出来才退回确认条
+        val now = SystemClock.elapsedRealtime()
+        // 一次点击页面可能连发两条同样的跳转（onclick + 兜底定时器），别开两次
+        if (url == lastAppPromptUrl && now - lastAppPromptAt < 3000) return
+        lastAppPromptUrl = url
+        lastAppPromptAt = now
+        hideOpenAppBar()
+        pendingAppUrl = url
+        pendingAppIntent = target.intent
+        pendingAppFallback = target.fallbackUrl
+        Log.i(TAG, "直接打开 App（不弹确认条）：$url → ${target.label}")
+        openPendingApp()
     }
 
     private fun hideOpenAppBar() {
