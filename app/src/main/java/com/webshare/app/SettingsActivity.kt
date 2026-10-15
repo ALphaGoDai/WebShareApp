@@ -1,5 +1,6 @@
 package com.webshare.app
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.graphics.Typeface
@@ -15,6 +16,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Switch
 import android.widget.TextView
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import com.google.android.material.snackbar.Snackbar
@@ -49,6 +51,7 @@ class SettingsActivity : AppCompatActivity() {
         tvVersion = findViewById(R.id.tvVersion)
 
         setupVoiceShortcuts()
+        setupGeoRule()
 
         findViewById<android.widget.ImageButton>(R.id.btnBack).setOnClickListener {
             finish()
@@ -109,6 +112,9 @@ class SettingsActivity : AppCompatActivity() {
             settingsManager.dohEnabled = dohEnabled
             settingsManager.dohUrl = if (dohUrl.isEmpty()) SettingsManager.DEFAULT_DOH_URL else dohUrl
             settingsManager.updateUrl = if (updateUrl.isEmpty()) SettingsManager.DEFAULT_UPDATE_URL else updateUrl
+
+            // 位置规则也一起收下（不然改了坐标再点这个「保存设置」会白改一场）
+            if (!saveGeoRule(announce = false)) return@setOnClickListener
 
             setResult(RESULT_OK)
             finish()
@@ -364,6 +370,199 @@ class SettingsActivity : AppCompatActivity() {
 
     private fun updateDohUrlVisibility() {
         layoutDohUrl.visibility = if (switchDoh.isChecked) View.VISIBLE else View.GONE
+    }
+
+    // ---------- 到某地自动打开 ----------
+
+    /** 权限申请回来之后要做的那件事（用当前位置填入 / 测试） */
+    private var pendingGeoAction: (() -> Unit)? = null
+
+    private val geoPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        val action = pendingGeoAction
+        pendingGeoAction = null
+        if (granted) {
+            action?.invoke()
+        } else {
+            snack("没有位置权限，没法判断在不在这附近（到系统设置里给「DNS浏览器」打开位置权限）")
+            refreshGeoUi()
+        }
+    }
+
+    private fun setupGeoRule() {
+        val switchGeo = findViewById<Switch>(R.id.switchGeo)
+        val etLat = findViewById<TextInputEditText>(R.id.etGeoLat)
+        val etLng = findViewById<TextInputEditText>(R.id.etGeoLng)
+        val etRadius = findViewById<TextInputEditText>(R.id.etGeoRadius)
+        val etUrl = findViewById<TextInputEditText>(R.id.etGeoUrl)
+
+        switchGeo.isChecked = settingsManager.geoEnabled
+        etLat.setText(settingsManager.geoLat)
+        etLng.setText(settingsManager.geoLng)
+        etRadius.setText(settingsManager.geoRadius.toString())
+        etUrl.setText(settingsManager.geoUrl)
+
+        switchGeo.setOnCheckedChangeListener { _, checked ->
+            if (checked && !GeoRule.hasPermission(this)) {
+                pendingGeoAction = { refreshGeoUi() }
+                geoPermissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+                return@setOnCheckedChangeListener
+            }
+            refreshGeoUi()
+        }
+        findViewById<Button>(R.id.btnGeoSave).setOnClickListener { saveGeoRule(announce = true) }
+        findViewById<Button>(R.id.btnGeoHere).setOnClickListener {
+            withLocation("已填入当前位置") { loc ->
+                etLat.setText(GeoRule.formatCoord(loc.latitude))
+                etLng.setText(GeoRule.formatCoord(loc.longitude))
+                if (etRadius.text?.toString().isNullOrBlank()) {
+                    etRadius.setText(SettingsManager.DEFAULT_GEO_RADIUS.toString())
+                }
+                if (etUrl.text?.toString().isNullOrBlank()) etUrl.setText(settingsManager.url.trim())
+            }
+        }
+        findViewById<Button>(R.id.btnGeoTest).setOnClickListener { testGeoRule() }
+        findViewById<Button>(R.id.btnGeoPickUrl).setOnClickListener { pickGeoUrl() }
+        refreshGeoUi()
+    }
+
+    /** 要一次位置再干活：没权限先申请，拿到位置后回调（拿不到就提示一句） */
+    private fun withLocation(doneHint: String, use: (android.location.Location) -> Unit) {
+        if (!GeoRule.hasPermission(this)) {
+            pendingGeoAction = { withLocation(doneHint, use) }
+            geoPermissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+            return
+        }
+        val btn = findViewById<Button>(R.id.btnGeoHere)
+        val oldText = btn.text
+        btn.isEnabled = false
+        btn.text = "定位中…"
+        GeoRule.requestSingle(this, 6000) { loc ->
+            btn.isEnabled = true
+            btn.text = oldText
+            if (loc == null) {
+                snack("没拿到位置：确认手机定位已打开、或到窗边/室外再试")
+                return@requestSingle
+            }
+            use(loc)
+            snack("$doneHint（精度约 ${loc.accuracy.toInt()} 米，来自 ${loc.provider}）")
+            refreshGeoUi()
+        }
+    }
+
+    /** 按输入框里的内容现场算一次距离，好知道范围设得合不合适 */
+    private fun testGeoRule() {
+        val lat = findViewById<TextInputEditText>(R.id.etGeoLat).text?.toString()?.trim()?.toDoubleOrNull()
+        val lng = findViewById<TextInputEditText>(R.id.etGeoLng).text?.toString()?.trim()?.toDoubleOrNull()
+        if (lat == null || lng == null) {
+            snack("先把纬度和经度填上（可以点「用当前位置填入」）")
+            return
+        }
+        val radius = findViewById<TextInputEditText>(R.id.etGeoRadius).text?.toString()?.trim()
+            ?.toIntOrNull() ?: SettingsManager.DEFAULT_GEO_RADIUS
+        withLocation("测试完成") { loc ->
+            val d = GeoRule.distanceMeters(loc.latitude, loc.longitude, lat, lng)
+            val inside = d <= radius
+            val precise = GeoRule.accurateEnough(loc, radius)
+            AlertDialog.Builder(this)
+                .setTitle(
+                    when {
+                        !precise -> "这次定位精度不够，判不准"
+                        inside -> "现在就在范围内"
+                        else -> "现在不在范围内"
+                    }
+                )
+                .setMessage(
+                    "当前位置：${GeoRule.formatCoord(loc.latitude)}, ${GeoRule.formatCoord(loc.longitude)}" +
+                            "（${GeoRule.describeAccuracy(loc)}，来自 ${loc.provider}）\n" +
+                            "目标位置：${GeoRule.formatCoord(lat)}, ${GeoRule.formatCoord(lng)}\n" +
+                            "直线距离：${GeoRule.describe(d)}\n" +
+                            "判定范围：$radius 米\n\n" +
+                            when {
+                                !precise ->
+                                    "定位误差（${GeoRule.describeAccuracy(loc)}）比判定范围还大，这种情况下打开 App 时不会判" +
+                                            "（宁可不动，也不在别处把人送错页）。到室外、或在手机设置里打开「高精度定位」再测一次。"
+                                inside -> "现在打开 App 会直接进设定的那一页。"
+                                else -> "现在打开 App 还是照常打开普通页面（差 ${GeoRule.describe(d - radius)}）。"
+                            }
+                )
+                .setPositiveButton("知道了", null)
+                .show()
+        }
+    }
+
+    /** 网址懒得手打：从语音快捷指令 / 标签页备注名里挑一个，没有就用起始页地址 */
+    private fun pickGeoUrl() {
+        val aliases = TabStore.load(this)?.tabs.orEmpty()
+            .filter { it.alias.isNotEmpty() && it.url.isNotEmpty() }
+            .map { VoiceShortcuts.Item(VoiceShortcuts.TAB_PREFIX + it.alias, "标签页「${it.alias}」", it.url) }
+            .distinctBy { it.id }
+        val all = aliases + VoiceShortcuts.load(this)
+        val items = all + VoiceShortcuts.Item("", "起始页（${settingsManager.url.trim()}）", settingsManager.url.trim())
+        val names = items.map { "${it.name}（${it.url}）" }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("选一个网址")
+            .setItems(names) { _, which ->
+                findViewById<TextInputEditText>(R.id.etGeoUrl).setText(items[which].url)
+                refreshGeoUi()
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun saveGeoRule(announce: Boolean): Boolean {
+        val switchGeo = findViewById<Switch>(R.id.switchGeo)
+        val latS = findViewById<TextInputEditText>(R.id.etGeoLat).text?.toString()?.trim().orEmpty()
+        val lngS = findViewById<TextInputEditText>(R.id.etGeoLng).text?.toString()?.trim().orEmpty()
+        val radiusS = findViewById<TextInputEditText>(R.id.etGeoRadius).text?.toString()?.trim().orEmpty()
+        val url = findViewById<TextInputEditText>(R.id.etGeoUrl).text?.toString()?.trim().orEmpty()
+
+        val lat = latS.toDoubleOrNull()
+        val lng = lngS.toDoubleOrNull()
+        val radius = radiusS.toIntOrNull() ?: SettingsManager.DEFAULT_GEO_RADIUS
+
+        if (switchGeo.isChecked) {
+            if (lat == null || lng == null || lat !in -90.0..90.0 || lng !in -180.0..180.0) {
+                snack("纬度/经度填得不对：纬度 −90~90，经度 −180~180（点「用当前位置填入」最省事）")
+                return false
+            }
+            if (url.isEmpty()) {
+                snack("要打开的网址还没填")
+                return false
+            }
+            val scheme = Uri.parse(url).scheme
+            if (scheme != "http" && scheme != "https") {
+                snack("网址要以 http:// 或 https:// 开头")
+                return false
+            }
+        }
+
+        settingsManager.geoEnabled = switchGeo.isChecked
+        settingsManager.geoLat = if (lat != null) GeoRule.formatCoord(lat) else ""
+        settingsManager.geoLng = if (lng != null) GeoRule.formatCoord(lng) else ""
+        settingsManager.geoRadius = radius.coerceIn(30, 100_000)
+        settingsManager.geoUrl = url
+        refreshGeoUi()
+        if (announce) {
+            snack(
+                if (switchGeo.isChecked) "已保存：到（$latS, $lngS）${settingsManager.geoRadius} 米内打开 App，就进设定那一页"
+                else "已保存：到某地自动打开的开关是关的，不会生效"
+            )
+        }
+        return true
+    }
+
+    private fun refreshGeoUi() {
+        val switchGeo = findViewById<Switch>(R.id.switchGeo)
+        val tv = findViewById<TextView>(R.id.tvGeoHint)
+        val rule = settingsManager.geoRule()
+        val perm = if (GeoRule.hasPermission(this)) "" else "（还没给位置权限：开关不会生效，点开关会申请一次）"
+        tv.text = if (rule == null) {
+            "当前：没有生效的规则${if (switchGeo.isChecked) "（开关开着，但坐标或网址还没填全）" else ""}$perm"
+        } else {
+            "当前：距离（${GeoRule.formatCoord(rule.lat)}, ${GeoRule.formatCoord(rule.lng)}）${rule.radiusMeters} 米内，打开 App 就进 ${rule.url}"
+        }
     }
 
     override fun onSupportNavigateUp(): Boolean {

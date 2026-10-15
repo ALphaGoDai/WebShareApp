@@ -14,9 +14,17 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- 网页 getUserMedia 录音（轰轰爱学习的语音跟读）：WebView 侧要 onPermissionRequest 放行 -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- 「到某地自动打开」：只在打开 App 那一刻读一次位置做判定（见 GeoRule.kt），
+         不做后台定位、不上报。粗精两档都声明，用户按系统给的档位授权都能用。 -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
 
     <uses-feature
         android:name="android.hardware.microphone"
+        android:required="false" />
+
+    <uses-feature
+        android:name="android.hardware.location"
         android:required="false" />
 
     <!-- Android 11+ 的包可见性：不声明这一条，targetSdk≥30 的应用看不见任何 TTS 引擎

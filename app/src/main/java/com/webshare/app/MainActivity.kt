@@ -111,6 +111,17 @@ class MainActivity : AppCompatActivity() {
     /** 冷启动那次已经在 initTabs 里加载过了，不用再"回前台刷新" */
     private var firstStartSeen = false
 
+    /** 「到某地自动打开」：一次进程只判一次（冷启动那一刻），判过就不再问位置 */
+    private var geoRuleChecked = false
+    /** 还没等到位置的异步判定：目标标签页 / 这一页本来就在加载的地址 / 起始时刻 */
+    private var geoPendingTab: Tab? = null
+    /** 等位置的时候这一页本来就要加载的地址（冷启动恢复的标签页会自己加载一次）——
+     *  这次加载不算"用户自己动了"，只有跳到别的地址才算 */
+    private var geoPendingKnownUrls: List<String> = emptyList()
+    private var geoPendingAt = 0L
+    /** 用户在这次冷启动里已经自己动过（点了标签页/开了新标签页/页面跳走了）→ 不抢 */
+    private var userTouchedSinceStart = false
+
     /** 网页请求打开别的 App：待打开的 Intent + 显示用信息（这条提示条的状态） */
     private var pendingAppIntent: Intent? = null
     private var pendingAppFallback: String? = null
@@ -318,6 +329,12 @@ class MainActivity : AppCompatActivity() {
         return !start.host.isNullOrEmpty() && start.host.equals(u.host, ignoreCase = true)
     }
 
+    /** 是不是同一个页面（忽略结尾斜杠、片段、大小写；WebView 报的地址常和存的不完全一样） */
+    private fun samePage(a: String, b: String): Boolean {
+        fun norm(s: String) = s.substringBefore('#').trim().trimEnd('/')
+        return norm(a).equals(norm(b), ignoreCase = true)
+    }
+
     /** 记一笔"接下来离开前台是去我们自己的页面"，别在回来时刷新 */
     private fun markOwnUi() {
         ownUiLaunchedAt = SystemClock.elapsedRealtime()
@@ -406,6 +423,16 @@ class MainActivity : AppCompatActivity() {
             currentSharedFiles = emptyMap()
             pendingAutoUploadJs = null
         }
+        // 「到某地自动打开」：只有"用户打开 App"这一种（点图标/最近任务）才判，而且每次打开都重判一次
+        // ——走到公交站时 App 多半还在后台，从桌面再点一下就该进设定页。分享进来的内容要占着当前页、
+        // 点通知是想看那条通知的页面，都不判；语音/深链在上面的分支里已经有目标页了（都 return 了）。
+        val fromNotification =
+            intent?.getBooleanExtra(WebNotifications.EXTRA_FROM_NOTIFICATION, false) == true
+        if (currentSharedText == null && !fromNotification) {
+            geoRuleChecked = false             // 这次"打开"重新判一次位置
+            userTouchedSinceStart = false
+            maybeApplyGeoRule()
+        }
         loadUrl()
     }
 
@@ -458,6 +485,105 @@ class MainActivity : AppCompatActivity() {
         val tab = addTab()
         tab.url = url
         tab.webView.loadUrl(url)
+    }
+
+    // ---------- 到某地自动打开（走到某个坐标附近，打开 App 就进设定那页） ----------
+
+    /**
+     * 冷启动这一次判一次位置（见 GeoRule）：
+     * ① 手上就有 10 分钟内的位置 → 立刻判，命中就把这一页换成设定页；
+     * ② 没有可用位置 → 先照常打开起始页，同时短超时要一次，拿到了、确实在范围内、
+     *    而且用户还没自己动过（没开切换器/没开新标签页/页面也没跳去别处）→ 再切过去。
+     * 没权限、系统定位没开、或者一次进程已经判过，就什么都不做。
+     */
+    private fun maybeApplyGeoRule() {
+        if (geoRuleChecked) return
+        geoRuleChecked = true
+        val rule = settingsManager.geoRule() ?: return
+        if (!GeoRule.hasPermission(this)) {
+            Log.i(TAG, "到点自动打开：没有位置权限，跳过")
+            return
+        }
+        val baseUrl = settingsManager.url.trim()
+        val tab = tabs.getOrNull(currentIndex) ?: return
+        // baseUrl 只用于日志/排错提示（见 openGeoRulePage 附近的判定日志）
+        Log.i(TAG, "到点自动打开：起始页 $baseUrl，规则 ${GeoRule.formatCoord(rule.lat)},${GeoRule.formatCoord(rule.lng)} 半径 ${rule.radiusMeters} 米")
+
+        val known = GeoRule.bestLastKnown(this)
+        if (known != null) {
+            val d = GeoRule.distanceMeters(known.latitude, known.longitude, rule.lat, rule.lng)
+            if (!GeoRule.accurateEnough(known, rule.radiusMeters)) {
+                Log.i(TAG, "到点自动打开：位置精度 ${GeoRule.describeAccuracy(known)} 比范围还差，不判")
+                return
+            }
+            Log.i(TAG, "到点自动打开：现在距目标 ${GeoRule.describe(d)}（阈值 ${rule.radiusMeters} 米，位置来自 ${known.provider}，精度 ${GeoRule.describeAccuracy(known)}）")
+            if (d <= rule.radiusMeters) openGeoRulePage(rule, d)
+            return
+        }
+        if (!GeoRule.locationServiceUsable(this)) {
+            Log.i(TAG, "到点自动打开：系统定位没开，跳过")
+            return
+        }
+        Log.i(TAG, "到点自动打开：还没有可用位置，向系统要一次（最多 2.5 秒）")
+        geoPendingTab = tab
+        geoPendingKnownUrls = listOfNotNull(tab.webView.url, tab.url, tab.pendingUrl)
+        geoPendingAt = SystemClock.elapsedRealtime()
+        GeoRule.requestSingle(this, 2500) { loc ->
+            if (loc == null) {
+                Log.i(TAG, "到点自动打开：没拿到位置，按不在范围内处理")
+                geoPendingTab = null
+                geoPendingKnownUrls = emptyList()
+                return@requestSingle
+            }
+            val d = GeoRule.distanceMeters(loc.latitude, loc.longitude, rule.lat, rule.lng)
+            Log.i(TAG, "到点自动打开：拿到位置，距目标 ${GeoRule.describe(d)}（来自 ${loc.provider}，精度 ${GeoRule.describeAccuracy(loc)}）")
+            val pending = geoPendingTab
+            geoPendingTab = null
+            geoPendingKnownUrls = emptyList()
+            if (pending == null) return@requestSingle
+            if (!GeoRule.accurateEnough(loc, rule.radiusMeters)) {
+                Log.i(TAG, "到点自动打开：精度太差，这次不判")
+                return@requestSingle
+            }
+            if (d > rule.radiusMeters) return@requestSingle
+            // 用户已经自己动过就别抢他的页面
+            if (userTouchedSinceStart) {
+                Log.i(TAG, "到点自动打开：用户已经自己动过，不切了")
+                return@requestSingle
+            }
+            if (tabs.getOrNull(currentIndex) !== pending) return@requestSingle
+            if (SystemClock.elapsedRealtime() - geoPendingAt > 8000) return@requestSingle
+            openGeoRulePage(rule, d)
+        }
+    }
+
+    /** 命中：还在起始页/空页就地把这一页换成设定页，否则新开一个（同地址已经在就切过去） */
+    private fun openGeoRulePage(rule: GeoRule.Rule, meters: Double) {
+        Toast.makeText(
+            this,
+            "到设定范围了（距目标 ${GeoRule.describe(meters)}），打开「${geoRuleLabel(rule)}」",
+            Toast.LENGTH_LONG
+        ).show()
+        val tab = tabs.getOrNull(currentIndex)
+        val empty = tab != null && !currentTabHasOwnUrl() &&
+                (tab.webView.url ?: "").isEmpty() && (tab.pendingUrl ?: "").isEmpty()
+        if (tab != null && empty) {
+            tab.url = rule.url
+            tab.pendingUrl = rule.url
+            tab.webView.loadUrl(rule.url)
+            persistTabs()
+            return
+        }
+        openUrlInTab(rule.url)
+    }
+
+    /** 提示语里的名字：能对上语音快捷指令/标签页备注名就用那个名字，否则用主机名 */
+    private fun geoRuleLabel(rule: GeoRule.Rule): String {
+        VoiceShortcuts.load(this).firstOrNull { it.url == rule.url }?.let { return it.name }
+        TabStore.load(this)?.tabs.orEmpty()
+            .firstOrNull { it.url == rule.url && it.alias.isNotEmpty() }
+            ?.let { return it.alias }
+        return try { java.net.URL(rule.url).host ?: rule.url } catch (e: Exception) { rule.url }
     }
 
     /** ACTION_SEND（单个）与 ACTION_SEND_MULTIPLE（相册多选）都从 EXTRA_STREAM 取 uri */
@@ -578,7 +704,10 @@ class MainActivity : AppCompatActivity() {
     private fun initTabs() {
         tabGrid.layoutManager = GridLayoutManager(this, 2)
         tabGrid.adapter = tabAdapter
-        findViewById<View>(R.id.btnNewTab).setOnClickListener { showAddressBar() }
+        findViewById<View>(R.id.btnNewTab).setOnClickListener {
+            userTouchedSinceStart = true   // 用户自己开新标签页了，到点自动打开别再插手
+            showAddressBar()
+        }
 
         val saved = TabStore.load(this)
         if (saved == null) {
@@ -947,6 +1076,15 @@ class MainActivity : AppCompatActivity() {
                 super.onPageStarted(view, url, favicon)
                 // 页面换了一页，上一条"打开 App"的提示就过期了
                 hideOpenAppBar()
+                // 「到点自动打开」还在等位置时，页面要是自己跳去了别的站点（用户点了别的链接），
+                // 说明人已经在看别的东西了——记一笔，等会儿判定命中也不抢这一页。
+                // 恢复的标签页冷启动那次自己的加载不算（地址本来就在加载的那个）。
+                val pending = geoPendingTab
+                if (pending != null && view === pending.webView && url != null && !isStartPage(url) &&
+                    geoPendingKnownUrls.none { samePage(it, url) }
+                ) {
+                    userTouchedSinceStart = true
+                }
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {
@@ -1107,6 +1245,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         findViewById<View>(R.id.navTabs).setOnClickListener {
+            userTouchedSinceStart = true   // 用户在翻标签页了，到点自动打开就别再插手
             openTabSwitcher()
         }
     }
@@ -1388,14 +1527,20 @@ class MainActivity : AppCompatActivity() {
                         refreshHistory()
                     }
                 }
+                val copy = ImageButton(this).apply {
+                    setImageResource(R.drawable.ic_nav_copy)
+                    background = selectableBackgroundBorderless()
+                    alpha = 0.55f
+                    contentDescription = "复制网址"
+                    setOnClickListener {
+                        copyToClipboard(addr)
+                        Toast.makeText(this@MainActivity, "已复制网址", Toast.LENGTH_SHORT).show()
+                    }
+                }
+                val btnSize = (30 * resources.displayMetrics.density).toInt()
+                row.addView(copy, LinearLayout.LayoutParams(btnSize, btnSize))
                 row.addView(tv, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-                row.addView(
-                    del,
-                    LinearLayout.LayoutParams(
-                        (30 * resources.displayMetrics.density).toInt(),
-                        (30 * resources.displayMetrics.density).toInt()
-                    )
-                )
+                row.addView(del, LinearLayout.LayoutParams(btnSize, btnSize))
                 historyBox.addView(row)
             }
         }
@@ -1423,6 +1568,16 @@ class MainActivity : AppCompatActivity() {
         obtainStyledAttributes(intArrayOf(android.R.attr.selectableItemBackgroundBorderless)).let { a ->
             try { a.getDrawable(0) } finally { a.recycle() }
         }
+
+    /** 复制到系统剪贴板（新建标签页的历史记录行上那个复制按钮用） */
+    private fun copyToClipboard(text: String) {
+        try {
+            val cm = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
+            cm.setPrimaryClip(android.content.ClipData.newPlainText("网址", text))
+        } catch (e: Exception) {
+            Log.w(TAG, "复制失败: ${e.message}")
+        }
+    }
 
     private fun openAddressInNewTab(raw: String) {
         val addr = raw.trim()

@@ -29,6 +29,42 @@ class SettingsManager(context: Context) {
         get() = prefs.getString(KEY_UPDATE_URL, DEFAULT_UPDATE_URL) ?: DEFAULT_UPDATE_URL
         set(value) = prefs.edit().putString(KEY_UPDATE_URL, value).apply()
 
+    // ---------- 到某地自动打开（「走到吕厝公交站就开乘车码」） ----------
+
+    var geoEnabled: Boolean
+        get() = prefs.getBoolean(KEY_GEO_ENABLED, false)
+        set(value) = prefs.edit().putBoolean(KEY_GEO_ENABLED, value).apply()
+
+    /** 目标纬度/经度：存字符串（十进制度），避免 Double 进 prefs 丢精度 */
+    var geoLat: String
+        get() = prefs.getString(KEY_GEO_LAT, "") ?: ""
+        set(value) = prefs.edit().putString(KEY_GEO_LAT, value).apply()
+
+    var geoLng: String
+        get() = prefs.getString(KEY_GEO_LNG, "") ?: ""
+        set(value) = prefs.edit().putString(KEY_GEO_LNG, value).apply()
+
+    /** 判定范围（米） */
+    var geoRadius: Int
+        get() = prefs.getInt(KEY_GEO_RADIUS, DEFAULT_GEO_RADIUS)
+        set(value) = prefs.edit().putInt(KEY_GEO_RADIUS, value).apply()
+
+    var geoUrl: String
+        get() = prefs.getString(KEY_GEO_URL, "") ?: ""
+        set(value) = prefs.edit().putString(KEY_GEO_URL, value).apply()
+
+    /** 解析成一条可用规则；没开、缺坐标、缺网址都返回 null（= 不生效） */
+    fun geoRule(): GeoRule.Rule? {
+        if (!geoEnabled) return null
+        val lat = geoLat.trim().toDoubleOrNull() ?: return null
+        val lng = geoLng.trim().toDoubleOrNull() ?: return null
+        val url = geoUrl.trim()
+        if (url.isEmpty()) return null
+        if (lat !in -90.0..90.0 || lng !in -180.0..180.0) return null
+        if (lat == 0.0 && lng == 0.0) return null                 // 没填过/填错的情况
+        return GeoRule.Rule(lat, lng, geoRadius.coerceIn(30, 100_000), url)
+    }
+
     private fun migrateSettings() {
         val version = prefs.getInt(KEY_SETTINGS_VERSION, 0)
         if (version < 2) {
@@ -58,6 +94,12 @@ class SettingsManager(context: Context) {
         private const val KEY_DOH_URL = "doh_url"
         private const val KEY_SETTINGS_VERSION = "settings_version"
         private const val KEY_UPDATE_URL = "update_url"
+        private const val KEY_GEO_ENABLED = "geo_enabled"
+        private const val KEY_GEO_LAT = "geo_lat"
+        private const val KEY_GEO_LNG = "geo_lng"
+        private const val KEY_GEO_RADIUS = "geo_radius"
+        private const val KEY_GEO_URL = "geo_url"
+        const val DEFAULT_GEO_RADIUS = 300
         const val DEFAULT_URL = "http://send.nbhonghong.top:7777/"
         const val DEFAULT_DOH_URL = "https://doh.pub/dns-query"
         const val DEFAULT_UPDATE_URL =
