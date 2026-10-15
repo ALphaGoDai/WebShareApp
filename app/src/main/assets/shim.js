@@ -850,4 +850,105 @@
     window.__wsNotifyInstalled = true;
   })();
 
+  // ---------- 厦门「i人才」刷码乘车页：登录回来别被扔去首页 ----------
+  // 站点自己的逻辑（assets/login-*.js 打包产物）：打开 /rideCode/index 时若没有登录态，
+  // 会被送去市民卡 SSO；回来之后由服务端 /h5/stateConfig?state=<Enter_Mode> 决定落点，
+  // state 缺省是 index → targetType=2 → location.replace("/italent/talentTraffic/rideCode/talent")。
+  // 于是「想看刷码乘车，最后落在人才服务首页」，在那点页面上的入口还会弹
+  // 「请从首页“人才出行”或者“出行礼遇”入口进入该服务」——它不是靠 UA 认浏览器，
+  // 认的是 Enter_Mode（进站来源）和 sdkState（有没有 App 的 JS bridge 报 deviceId）。
+  // 站点没给普通浏览器留回原页的路，这里替它补上：记住用户当前在等哪个 rideCode 页面
+  // （sessionStorage，同一标签页里跨域登录、整页刷新都不丢；SPA 内部跳转也跟着更新），
+  // 一旦发现「刚走过登录回调页」又被扔到 /rideCode/talent，就回原页一次。
+  // 只认整页加载（登录回来必然是整页加载），SPA 里自己点去首页不受影响。
+  (function keepRideCodePage() {
+    if (location.hostname !== 'xmirc.xmdjej.gov.cn') return;
+    var PREFIX = '/italent/talentTraffic/rideCode/';
+    var K_WANT = 'ws_ridecode_want';
+    var K_LOGIN = 'ws_ridecode_login_at';
+    var LOGIN_WINDOW_MS = 10 * 60 * 1000;  // 登录回调页 → 落点只隔几百毫秒，10 分钟足够宽
+    var BOUNCE_LIMIT = 3;                  // 15 秒内同一目标最多回弹 3 次，兜住和站点的死循环
+    var store = null;
+    try {
+      store = window.sessionStorage;
+      store.setItem('ws_probe', '1');
+      store.removeItem('ws_probe');
+    } catch (e) { store = null; }
+    if (!store) return;
+
+    function parts(href) {
+      var u;
+      try { u = new URL(href, location.href); } catch (e) { return null; }
+      if (u.pathname.indexOf(PREFIX) !== 0) return null;
+      return {
+        path: u.pathname + u.search,
+        page: u.pathname.slice(PREFIX.length).replace(/\/+$/, '')
+      };
+    }
+    function want() {
+      try { return JSON.parse(store.getItem(K_WANT) || 'null'); } catch (e) { return null; }
+    }
+    // rideCode 里的内容页才算「用户想去的地方」；首页/信息页/登录页都不算
+    function isContent(page) {
+      return page === 'index' || page === 'travelRecord' || page === 'useHelp';
+    }
+    function track(p) {
+      if (p.page.indexOf('login') === 0) {          // 登录回调页：记一笔「这趟是登录来的」
+        store.setItem(K_LOGIN, String(Date.now()));
+        return;
+      }
+      if (isContent(p.page)) {
+        var prev = want();
+        var now = Date.now();
+        var n = (prev && prev.u === p.path && (now - (prev.t || 0)) < 15000) ? (prev.n || 1) + 1 : 1;
+        if (n > BOUNCE_LIMIT) store.removeItem(K_WANT);
+        else store.setItem(K_WANT, JSON.stringify({ u: p.path, t: now, n: n }));
+      } else {
+        store.removeItem(K_WANT);                   // 用户自己去看别的页了，意向作废
+      }
+    }
+    function note(href) {                           // 同站但别的业务线（旅游年卡…）也算离开
+      var p = parts(href);
+      if (p) { track(p); return; }
+      var u;
+      try { u = new URL(href, location.href); } catch (e) { return; }
+      if (u.hostname === location.hostname) store.removeItem(K_WANT);
+    }
+
+    var here = parts(location.href);
+    if (here && here.page === 'talent') {           // 刚被登录流程扔到人才服务首页？
+      var w = want();
+      var loginAt = parseInt(store.getItem(K_LOGIN) || '0', 10) || 0;
+      if (w && w.u && w.u !== here.path && loginAt > 0 &&
+          (Date.now() - loginAt) < LOGIN_WINDOW_MS && (w.n || 1) <= BOUNCE_LIMIT) {
+        store.removeItem(K_WANT);
+        store.removeItem(K_LOGIN);
+        console.log('[DNS浏览器] 登录回来被放到人才服务首页，带你回 ' + w.u);
+        location.replace(w.u);
+        return;
+      }
+    }
+    note(location.href);
+
+    // SPA 内部跳转（vue-router 走 pushState/replaceState）也要跟着更新意向，
+    // 否则「先客户端跳到首页、再登录过期」这种路径会拿着过期意向乱回弹
+    try {
+      ['pushState', 'replaceState'].forEach(function (m) {
+        var orig = history[m];
+        if (typeof orig !== 'function') return;
+        history[m] = function () {
+          var r = orig.apply(this, arguments);
+          try { note(location.href); } catch (e) {}
+          return r;
+        };
+      });
+      window.addEventListener('popstate', function () {
+        try { note(location.href); } catch (e) {}
+      });
+      window.addEventListener('hashchange', function () {
+        try { note(location.href); } catch (e) {}
+      });
+    } catch (e) {}
+  })();
+
 })();
