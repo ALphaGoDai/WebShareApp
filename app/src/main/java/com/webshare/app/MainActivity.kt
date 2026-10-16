@@ -54,6 +54,14 @@ class MainActivity : AppCompatActivity() {
     private lateinit var openAppIcon: ImageView
     private lateinit var openAppName: TextView
 
+    /** 底栏上方「发现视频 · 缓存到浏览器」提示条（这一页出现了视频源时浮出来） */
+    private lateinit var mediaBar: View
+    private lateinit var mediaTitle: TextView
+    private lateinit var mediaSub: TextView
+
+    /** 用户点过 ✕：这一页不再浮动条（换页/换标签页会重新判） */
+    private var mediaDismissed = false
+
     /** 多标签页：每页一个独立 WebView 和桥接实例，切换时换入换出 */
     private inner class Tab(
         val iface: WebAppInterface,
@@ -242,6 +250,7 @@ class MainActivity : AppCompatActivity() {
         initTabs()
         setupBottomBar()
         setupOpenAppBar()
+        setupMediaBar()
         setupBackNavigation()
 
         // 系统 TTS：注入脚本里的 speechSynthesis 补丁靠它出声，早点初始化，页面一问就有嗓音
@@ -274,6 +283,12 @@ class MainActivity : AppCompatActivity() {
         lastStoppedAt = SystemClock.elapsedRealtime()
         persistTabs(commit = true)   // 退到后台先把标签页记下来（同步落盘，进程随后被杀也带得走）
         flushCookies()               // 登录状态同理：不落盘的话进程被杀就丢，下次还得重新登录
+    }
+
+    override fun onDestroy() {
+        // MediaWatch 是个单例，回调里握着这个 Activity：不摘掉就是内存泄漏
+        MediaWatch.onChange = null
+        super.onDestroy()
     }
 
     // ---------- 登录状态（Cookie） ----------
@@ -367,6 +382,19 @@ class MainActivity : AppCompatActivity() {
         // （id 以 tab: 开头的是"标签页备注名"，直接切到那个标签页）
         val data = intent?.data
         if (action == Intent.ACTION_VIEW && data?.scheme == VoiceShortcuts.SCHEME) {
+            // webshare://play/<缓存id>：缓存列表点「播放」，就在本浏览器里打开离线播放页
+            if (data.host == "play") {
+                val id = data.lastPathSegment?.toLongOrNull()
+                val entry = id?.let { VideoCacheStore.find(this, it) }
+                val url = entry?.let { LocalMediaServer.playerUrl(this, it) }
+                if (url != null) {
+                    Log.i(TAG, "打开离线播放页：${entry!!.title} → $url")
+                    openUrlInTab(url)
+                } else {
+                    Toast.makeText(this, "这份缓存已经不在了", Toast.LENGTH_SHORT).show()
+                }
+                return
+            }
             val seg = data.lastPathSegment
             if (seg != null && seg.startsWith(VoiceShortcuts.TAB_PREFIX)) {
                 val alias = seg.removePrefix(VoiceShortcuts.TAB_PREFIX)
@@ -1082,6 +1110,11 @@ class MainActivity : AppCompatActivity() {
                 super.onPageStarted(view, url, favicon)
                 // 页面换了一页，上一条"打开 App"的提示就过期了
                 hideOpenAppBar()
+                // 换页了：上一页发现的视频不再算这一页的，浮动条也收起来（新页面发现视频会再浮出来）
+                MediaWatch.clearView(view)
+                MediaWatch.setPageUrl(view, url)   // 记地址（拦截线程不能碰 WebView，只能在这儿记）
+                mediaDismissed = false
+                if (view === tabs.getOrNull(currentIndex)?.webView) refreshMediaBar()
                 // 「到点自动打开」还在等位置时，页面要是自己跳去了别的站点（用户点了别的链接），
                 // 说明人已经在看别的东西了——记一笔，等会儿判定命中也不抢这一页。
                 // 恢复的标签页冷启动那次自己的加载不算（地址本来就在加载的那个）。
@@ -1121,6 +1154,86 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+    }
+
+    // ---------- 缓存视频（发现这一页的视频，存进浏览器离线看） ----------
+
+    private fun setupMediaBar() {
+        mediaBar = findViewById(R.id.mediaBar)
+        mediaTitle = findViewById(R.id.mediaTitle)
+        mediaSub = findViewById(R.id.mediaSub)
+        findViewById<View>(R.id.mediaGo).setOnClickListener { showVideoCandidates() }
+        findViewById<View>(R.id.mediaIcon).setOnClickListener { showVideoCandidates() }
+        findViewById<View>(R.id.mediaClose).setOnClickListener {
+            mediaDismissed = true
+            mediaBar.visibility = View.GONE
+        }
+        // 发现新视频（在 WebViewClient 的线程上）→ 回主线程刷新提示条
+        MediaWatch.onChange = { runOnUiThread { refreshMediaBar() } }
+        refreshMediaBar()
+    }
+
+    /** 当前这一页有没有可缓存的视频？有就浮出提示条 */
+    private fun refreshMediaBar() {
+        if (!this::mediaBar.isInitialized) return
+        val tab = tabs.getOrNull(currentIndex)
+        val found = if (tab == null) emptyList() else MediaWatch.forView(tab.webView)
+        if (found.isEmpty() || mediaDismissed) {
+            mediaBar.visibility = View.GONE
+            return
+        }
+        val first = found.first()
+        mediaTitle.text = if (found.size > 1) "发现 ${found.size} 个视频" else "发现视频"
+        mediaSub.text = "${first.baseName} · ${DownloadService.fmtSize(first.size)}".let {
+            if (first.size > 0) it else "${first.baseName} · ${first.kindLabel}"
+        }
+        mediaBar.visibility = View.VISIBLE
+    }
+
+    /** 挑一个缓存（多个候选时列出来让用户选） */
+    private fun showVideoCandidates() {
+        val tab = tabs.getOrNull(currentIndex) ?: return
+        val list = MediaWatch.forView(tab.webView)
+        if (list.isEmpty()) {
+            mediaBar.visibility = View.GONE
+            Toast.makeText(this, "这一页没看到能缓存的视频", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (list.size == 1) {
+            startCache(list[0])
+            return
+        }
+        val labels = list.map { item ->
+            val size = if (item.size > 0) " · ${DownloadService.fmtSize(item.size)}" else ""
+            "${item.baseName}（${item.kindLabel}$size）\n${item.shortUrl}"
+        }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("缓存哪个视频？")
+            .setItems(labels) { _, which -> startCache(list[which]) }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun startCache(item: MediaWatch.Item) {
+        val tab = tabs.getOrNull(currentIndex)
+        val title = pickVideoTitle(item, tab)
+        mediaDismissed = true
+        mediaBar.visibility = View.GONE
+        Toast.makeText(this, "开始缓存：$title\n进度在通知栏，缓存完在「缓存」里离线看", Toast.LENGTH_LONG).show()
+        Log.i(TAG, "开始缓存视频：$title ${item.kind} ${item.url}")
+        VideoCacheService.start(this, item, title)
+    }
+
+    /**
+     * 缓存文件叫什么名字：优先用视频自己的文件名，但播放列表那种（index.m3u8 / playlist）
+     * 认不出内容，就改用标签页标题（一般是视频名）。
+     */
+    private fun pickVideoTitle(item: MediaWatch.Item, tab: Tab?): String {
+        val base = item.baseName
+        val generic = base.length < 4 || base.matches(Regex("\\d+")) ||
+                base.lowercase() in setOf("index", "playlist", "master", "manifest", "video", "media", "hls", "out", "v")
+        val tabName = (tab?.alias?.takeIf { !it.isNullOrBlank() } ?: tab?.title)?.trim()
+        return if (generic && !tabName.isNullOrBlank()) tabName.take(60) else base
     }
 
     // ---------- 网页请求打开别的 App（Chrome 的「此网站请求打开 App」） ----------
@@ -1250,6 +1363,11 @@ class MainActivity : AppCompatActivity() {
             startActivity(Intent(this, DownloadsActivity::class.java))
         }
 
+        findViewById<View>(R.id.navCache).setOnClickListener {
+            markOwnUi()
+            startActivity(Intent(this, VideoCacheActivity::class.java))
+        }
+
         findViewById<View>(R.id.navTabs).setOnClickListener {
             userTouchedSinceStart = true   // 用户在翻标签页了，到点自动打开就别再插手
             openTabSwitcher()
@@ -1350,6 +1468,7 @@ class MainActivity : AppCompatActivity() {
     private fun switchTo(index: Int) {
         if (index !in tabs.indices) return
         hideOpenAppBar()   // 换标签页了，上一条"打开 App"的提示过期
+        mediaDismissed = false
         if (currentIndex in tabs.indices && currentIndex != index) {
             captureThumb(tabs[currentIndex])
         }
@@ -1372,6 +1491,7 @@ class MainActivity : AppCompatActivity() {
         updateTabBadge()
         hideTabSwitcher()
         persistTabs()
+        refreshMediaBar()   // 切过来的这一页可能已经发现过视频
     }
 
     private fun closeTab(index: Int) {

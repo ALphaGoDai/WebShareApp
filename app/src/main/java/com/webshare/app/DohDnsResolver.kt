@@ -38,6 +38,11 @@ class DohDnsResolver(private val dnsServer: String) : Dns {
     private data class CacheEntry(val addresses: List<InetAddress>, val expiry: Long)
 
     override fun lookup(hostname: String): List<InetAddress> {
+        // 本来就是 IP（127.0.0.1、内网地址、IPv6）不用查 DNS——查了反而可能被 DoH 判成不存在。
+        // 缓存视频的离线播放（127.0.0.1）和"保存到手机"就靠这一条。
+        if (isIpLiteral(hostname)) {
+            return listOf(InetAddress.getByName(hostname))
+        }
         val cached = cache[hostname]
         if (cached != null && System.currentTimeMillis() < cached.expiry) {
             return cached.addresses
@@ -207,6 +212,15 @@ class DohDnsResolver(private val dnsServer: String) : Dns {
             }
             dis.skipBytes(len)
         }
+    }
+
+    /** 地址本身就是 IP（v4 / 带方括号的 v6）时不用走 DNS */
+    private fun isIpLiteral(hostname: String): Boolean {
+        val h = hostname.trim().removePrefix("[").removeSuffix("]")
+        if (h.contains(':')) return true          // IPv6 字面量
+        val parts = h.split('.')
+        if (parts.size != 4) return false
+        return parts.all { p -> p.isNotEmpty() && p.length <= 3 && p.all { it.isDigit() } && p.toInt() <= 255 }
     }
 
     companion object {

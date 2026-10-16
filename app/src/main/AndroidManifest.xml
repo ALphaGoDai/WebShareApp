@@ -134,5 +134,28 @@
             android:name=".DownloadService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <!-- 缓存视频：缓存下来的视频列表（离线看 / 保存到手机 / 分享 / 删） -->
+        <activity
+            android:name=".VideoCacheActivity"
+            android:exported="false"
+            android:label="@string/videocache_title" />
+
+        <!-- 缓存视频：把视频分片抓下来合成一个文件，进度发通知栏 -->
+        <service
+            android:name=".VideoCacheService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!-- 分享缓存好的视频给别的 App（file:// 在 Android 7+ 会崩，必须走 FileProvider） -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 </manifest>

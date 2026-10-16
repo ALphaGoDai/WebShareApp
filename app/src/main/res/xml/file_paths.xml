@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 分享缓存视频给别的 App 时暴露的目录：只开缓存视频这一层，别的私有文件不暴露 -->
+<paths>
+    <external-files-path name="videocache" path="videocache/" />
+</paths>

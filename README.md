@@ -37,6 +37,9 @@
 - **到某地自动打开**（v1.0.50 起）：设置里填一个坐标 + 范围（米）+ 网址——走到那儿打开 App
   就直接进设好的那一页（比如到吕厝公交站打开就进「刷码乘车」）。只在打开 App 那一刻读一次位置
   （且只认 1 分钟内的定位，更旧就当场重新要一次），不做后台定位、不上报，详见「方式 P」
+- **缓存视频、离线看**（v1.0.52 起）：网页里出现视频时，底栏上方浮出「发现视频 · 缓存到浏览器」，
+  点一下存进 App 自己的目录（底栏「缓存」那一页能看到缓存了什么）；之后**不联网也能看**，
+  还能存到手机或分享出去。直链 mp4/webm、HLS 分片列表（含 fMP4）都行，TS 会自动换成 mp4，详见「方式 Q」
 - **JavaScript 接口**：网页可通过 JavaScript 获取分享内容、剪贴板、网络桥接
 
 ## 项目结构
@@ -499,6 +502,29 @@ App 侧的补法（`assets/shim.js` 里 `keepRideCodePage()`，注入在主框�
 - 位置权限只在开关打开时申请一次（`ACCESS_COARSE/FINE_LOCATION`，只在前台用；清单里
   `android.hardware.location` 标了 `required="false"`，没有定位硬件的设备照装不误）。
 
+### 方式 Q：缓存视频、离线看（v1.0.52 起）
+
+页面在放视频时，底栏上方会浮出一条「发现视频 · 缓存到浏览器」（同一个页面里有好几个视频就写
+「发现 N 个视频」，点开挑一个）。点「缓存」就开始存，进度在通知栏（渠道「视频缓存」，带取消），
+存好了点通知直接进「缓存」页；底栏第 4 个按钮「缓存」也随时能进去看。
+
+- **缓存完不联网也能看**：视频存在 App 自己的目录里（`Android/data/com.webshare.app/files/videocache/`），
+  播放走 App 内置的本机播放页 `http://127.0.0.1:<随机端口>/p/<随机口令>/<id>`（支持 Range，能拖进度条），
+  跟原网站、跟网络都没关系了——出站路上刷剧、原站的视频被删了都不影响。
+- **能缓存什么**：直链文件（mp4 / webm / mkv / mov …）、HLS 分片列表（`.m3u8`，TS 分片和 fMP4 分片都行）。
+  多码率的播放列表会**自动挑码率最高的那一路**。地址上没有扩展名也认——服务器回的 `Content-Type`
+  是视频就记下来（`/video/12345` 这种站点能用）。
+- **自动处理的**：TS 分片拼起来后会用系统的 `MediaExtractor/MediaMuxer` **换成 mp4**（只换封装、不重编码，
+  几秒钟），这样任何播放器/相册都认，分享出去也不会「格式不支持」；换不成就保留 `.ts`，并让播放页按
+  TS 如实声明类型。
+- **明说不支持的**：加密的 HLS（`EXT-X-KEY` 不是 NONE）和用 `EXT-X-BYTERANGE` 的分片会直接拒绝，
+  通知里写明原因（不去偷学密钥、也不拼半个文件出来）；DASH（`.mpd`）同理。
+- **缓存页**每条能做四件事：**播放**（就在本浏览器里打开离线播放页）、**存到手机**（走「已下载」那套，
+  落到系统下载目录或你自己选的目录）、**分享**（`FileProvider`，微信/QQ 这类收得到）、**删除**；
+  右上角「全部清空」一次清干净。页面顶部写着缓存了几个、一共占多少空间。
+- **不打扰**：只在 App 里认页面上的视频源，不往页面里插东西、不改网页内容；本机播放地址（127.0.0.1）
+  不走 DoH、也不会被当成「发现视频」。点浮动条右边的 ✕，这一页就不再提示（换页 / 换标签页会重新判）。
+
 ## 技术说明
 
 ### DoH 实现原理
@@ -589,6 +615,38 @@ App 侧的补法（`assets/shim.js` 里 `keepRideCodePage()`，注入在主框�
 `READ_MEDIA_IMAGES` 时 MediaProvider 会对视频 uri 抛
 `SecurityException: com.webshare.app has no access to content://media/...`，清单里补齐、
 首次分享时申请一次。
+
+### 缓存视频的实现（v1.0.52）
+
+**发现**（`MediaWatch.kt`）——在 `shouldInterceptRequest` 里看每一跳 GET 的地址：`.m3u8/.m3u` 记成
+HLS 候选、`.mpd` 记成 DASH、`.mp4/.webm/...` 记成直链；同一个页面一旦有 HLS 候选，后面的分片
+（`.ts/.m4s`）就不再单独记（它们要靠播放列表才拼得回来），每个页面最多留 6 条。地址认不出来的
+（`/video/12345`、`/stream?src=…`）靠**响应头**补记：走我们自己通道拿到的 `Content-Type` 是视频就记下来。
+⚠️ 记候选发生在 WebView 的拦截线程上，那里**不能碰 WebView 的任何方法**（`view.url` 会抛
+`A WebView method was called on thread`）——页面地址由主线程的 `onPageStarted` 通过 `setPageUrl` 记。
+本机地址（127.0.0.1 / localhost / 分享用的虚拟地址）在拦截器开头就 `return null`：不走 DoH、
+不做整份交付、也不记成"发现视频"。
+
+**下载**（`VideoCacheService.kt` + `VideoCache.kt`）——前台服务（`dataSync`）串行跑队列，进度发通知栏
+（渠道「视频缓存」，通知带「取消」，正在缓存的那一条可以取消）。直链走 `HttpEngine`（同一个 DoH /
+Cookie 通道，`Referer` 带原页面）；HLS 先取播放列表，多码率（`#EXT-X-STREAM-INF`）挑 BANDWIDTH 最高
+的一路，`#EXT-X-MAP` 的初始化段拼在最前面（fMP4 拼出来就是 mp4），TS 拼完用
+`MediaExtractor/MediaMuxer` 换封装成 mp4（失败就留 `.ts` 并由播放页按 `video/mp2t` 声明）。
+下一个文件之前先看剩余空间，不够就当场报错、不留半个文件。
+
+**离线播放**（`LocalMediaServer.kt`）——只听 `127.0.0.1` 的小 HTTP 服务（随机端口 + 路径里的随机口令，
+同机别的 App 猜不到）：`/p/<口令>/<id>` 是内置播放页（`<video>` 直接指同源的 `/v/<口令>/<id>`），
+`/v/...` 是视频文件本身，支持 `Range`/206（所以进度条能拖），按扩展名给 `video/mp4`、`video/mp2t` 等类型。
+播放页只是 App 里的一页，点「播放」是开一个新标签页去 `webshare://play/<id>`（`CLEAR_TOP|SINGLE_TOP`
+复用同一个浏览器实例），返回键就回到缓存列表。
+
+**顺带修的一处**：`DohDnsResolver` 现在看到地址本身就是 IP（127.0.0.1、内网地址、IPv6）就直接返回，
+不再拿去问 DoH ——否则"保存到手机"里那个 `http://127.0.0.1:...` 的下载源会解析失败。
+
+**落盘**：`Android/data/com.webshare.app/files/videocache/`（一个视频一个文件 + `index.json` 索引，
+文件名是 `<时间戳>-<标题>.mp4`）。删除 / 清空会连文件一起删；分享走
+`FileProvider`（authority `${applicationId}.fileprovider`，只暴露 `videocache/` 这一层）；
+「存到手机」借用「已下载」那套（`DownloadService` 从本机地址读、写进系统下载目录或用户选的目录）。
 
 ### 最低系统要求
 

@@ -110,6 +110,18 @@ open class DohWebViewClient(
             return serveSharedFile(path.removePrefix(SHARED_PATH_PREFIX))
         }
 
+        // 本机地址（缓存视频的离线播放页与视频文件由 LocalMediaServer 提供）：直接交给 WebView，
+        // 不走 DoH / 整份交付那一套，也别记成"发现视频"
+        if (host == "127.0.0.1" || host.equals("localhost", true) || host == "::1") return null
+
+        // 「缓存视频」：这一跳是不是视频源（直链 / HLS 播放列表 / DASH），是就记下来，
+        // 页面上才会冒出那个缓存入口
+        try {
+            MediaWatch.observe(view, urlStr, request.requestHeaders ?: emptyMap())
+        } catch (e: Exception) {
+            Log.w(TAG, "MediaWatch.observe failed: ${e.message}")
+        }
+
         // WebView (especially Huawei/HarmonyOS) auto-upgrades http to https.
         // Undo the upgrade when the configured site is http://.
         if (scheme == "https" && forceHttpHost.isNotEmpty() && host == forceHttpHost) {
@@ -120,7 +132,7 @@ open class DohWebViewClient(
         if (request.isForMainFrame && recentlyDeclined(urlStr)) return null
 
         val result = try {
-            smartFetch(urlStr, host, request.requestHeaders, request.isForMainFrame)
+            smartFetch(urlStr, host, request.requestHeaders, request.isForMainFrame, view)
         } catch (e: Exception) {
             if (request.isForMainFrame) {
                 Log.w(TAG, "main frame failed: $urlStr (${e.message})")
@@ -135,6 +147,15 @@ open class DohWebViewClient(
         }
         if (request.isForMainFrame && result == null) {
             declinedNavigations[urlStr] = System.currentTimeMillis()
+        }
+        // 响应头说是视频的（站点用 /video/12345 这类没扩展名的地址）：也记成可缓存的候选。
+        // 放在这儿是因为只有走我们自己的通道时才能看到 Content-Type。
+        if (result != null && !request.isForMainFrame) {
+            try {
+                MediaWatch.observeByMime(view, urlStr, result.mimeType)
+            } catch (e: Exception) {
+                Log.w(TAG, "MediaWatch.observeByMime failed: ${e.message}")
+            }
         }
         return result
     }
@@ -192,7 +213,8 @@ open class DohWebViewClient(
         urlStr: String,
         host: String,
         headers: Map<String, String>,
-        isMainFrame: Boolean
+        isMainFrame: Boolean,
+        view: WebView?
     ): WebResourceResponse? {
         if (!isVideoResponse(null, urlStr) || !rangeStartsAtZero(headers)) {
             return dispatchFetch(urlStr, host, headers, isMainFrame)
@@ -202,7 +224,7 @@ open class DohWebViewClient(
             if (!k.equals("Range", true)) eff[k] = v
         }
         eff["Range"] = "bytes=0-" + (VIDEO_WHOLE_CAP - 1)
-        return serveWholeVideo(dispatchFetch(urlStr, host, eff, isMainFrame))
+        return serveWholeVideo(dispatchFetch(urlStr, host, eff, isMainFrame), urlStr, view)
     }
 
     /** Range 请求从第 0 字节开始（没有 Range 头也算：那本来就是整份请求） */
@@ -212,9 +234,15 @@ open class DohWebViewClient(
     }
 
     /** 206 但 Content-Range 覆盖 0..N-1（= 拿到整份文件）时改以 200 交出 */
-    private fun serveWholeVideo(resp: WebResourceResponse?): WebResourceResponse? {
+    private fun serveWholeVideo(resp: WebResourceResponse?, urlStr: String, view: WebView?): WebResourceResponse? {
         if (resp == null) return null                      // 已决定交回 WebView
-        if (resp.statusCode == 200) return resp            // 本来就是整份
+        if (resp.statusCode == 200) {
+            // 整份就在手上：顺势把真实大小告诉「缓存视频」，弹窗里能显示体积
+            val len = (resp.data as? ByteArrayInputStream)?.available()?.toLong() ?: -1L
+            MediaWatch.noteResponse(urlStr, resp.mimeType, len)
+            MediaWatch.observeByMime(view, urlStr, resp.mimeType)   // 没扩展名的视频地址靠响应头认出来
+            return resp
+        }
         val stream = resp.data ?: return resp
         val len = if (stream is ByteArrayInputStream) stream.available() else return resp
         val cr = resp.responseHeaders?.entries
@@ -224,6 +252,8 @@ open class DohWebViewClient(
         val end = m.groupValues[2].toLong()
         val total = m.groupValues[3].toLong()
         if (start != 0L || end + 1 != total || len.toLong() != total) return resp
+        MediaWatch.noteResponse(urlStr, resp.mimeType, total)
+        MediaWatch.observeByMime(view, urlStr, resp.mimeType)
         val h = HashMap<String, String>(resp.responseHeaders ?: emptyMap())
         // Accept-Ranges 也要去掉：站点声明支持 Range，WebView 拿到整份 200 之后还会
         // 按 Range 回头再取一遍（实测：4.6MB 的文件整份交付后又被请求了 196608- 那一段），
