@@ -516,27 +516,32 @@ class MainActivity : AppCompatActivity() {
                 Log.i(TAG, "到点自动打开：位置精度 ${GeoRule.describeAccuracy(known)} 比范围还差，不判")
                 return
             }
-            Log.i(TAG, "到点自动打开：现在距目标 ${GeoRule.describe(d)}（阈值 ${rule.radiusMeters} 米，位置来自 ${known.provider}，精度 ${GeoRule.describeAccuracy(known)}）")
-            if (d <= rule.radiusMeters) openGeoRulePage(rule, d)
+            Log.i(TAG, "到点自动打开：现在距目标 ${GeoRule.describe(d)}（阈值 ${rule.radiusMeters} 米，位置来自 ${known.provider}，精度 ${GeoRule.describeAccuracy(known)}，${GeoRule.describeAge(GeoRule.ageMs(known))}）")
+            if (d <= rule.radiusMeters) openGeoRulePage(rule, d, GeoRule.ageMs(known))
             return
         }
         if (!GeoRule.locationServiceUsable(this)) {
             Log.i(TAG, "到点自动打开：系统定位没开，跳过")
             return
         }
-        Log.i(TAG, "到点自动打开：还没有可用位置，向系统要一次（最多 2.5 秒）")
+        Log.i(TAG, "到点自动打开：没有一分钟内的定位，当场要一次（最多 6 秒）")
         geoPendingTab = tab
         geoPendingKnownUrls = listOfNotNull(tab.webView.url, tab.url, tab.pendingUrl)
         geoPendingAt = SystemClock.elapsedRealtime()
-        GeoRule.requestSingle(this, 2500) { loc ->
+        GeoRule.requestSingle(this, 6000) { res ->
+            val loc = res.loc
             if (loc == null) {
-                Log.i(TAG, "到点自动打开：没拿到位置，按不在范围内处理")
+                if (res.staleAgeMs > 0) {
+                    Log.i(TAG, "到点自动打开：只拿到 ${GeoRule.describeAge(res.staleAgeMs)}，不是当前坐标，不判")
+                } else {
+                    Log.i(TAG, "到点自动打开：没拿到位置，按不在范围内处理")
+                }
                 geoPendingTab = null
                 geoPendingKnownUrls = emptyList()
                 return@requestSingle
             }
             val d = GeoRule.distanceMeters(loc.latitude, loc.longitude, rule.lat, rule.lng)
-            Log.i(TAG, "到点自动打开：拿到位置，距目标 ${GeoRule.describe(d)}（来自 ${loc.provider}，精度 ${GeoRule.describeAccuracy(loc)}）")
+            Log.i(TAG, "到点自动打开：拿到位置，距目标 ${GeoRule.describe(d)}（来自 ${loc.provider}，精度 ${GeoRule.describeAccuracy(loc)}，${GeoRule.describeAge(GeoRule.ageMs(loc))}）")
             val pending = geoPendingTab
             geoPendingTab = null
             geoPendingKnownUrls = emptyList()
@@ -552,16 +557,17 @@ class MainActivity : AppCompatActivity() {
                 return@requestSingle
             }
             if (tabs.getOrNull(currentIndex) !== pending) return@requestSingle
-            if (SystemClock.elapsedRealtime() - geoPendingAt > 8000) return@requestSingle
-            openGeoRulePage(rule, d)
+            if (SystemClock.elapsedRealtime() - geoPendingAt > 11000) return@requestSingle
+            openGeoRulePage(rule, d, GeoRule.ageMs(loc))
         }
     }
 
     /** 命中：还在起始页/空页就地把这一页换成设定页，否则新开一个（同地址已经在就切过去） */
-    private fun openGeoRulePage(rule: GeoRule.Rule, meters: Double) {
+    private fun openGeoRulePage(rule: GeoRule.Rule, meters: Double, fixAgeMs: Long) {
         Toast.makeText(
             this,
-            "到设定范围了（距目标 ${GeoRule.describe(meters)}），打开「${geoRuleLabel(rule)}」",
+            "到设定范围了（距目标 ${GeoRule.describe(meters)}，${GeoRule.describeAge(fixAgeMs)}），" +
+                    "打开「${geoRuleLabel(rule)}」",
             Toast.LENGTH_LONG
         ).show()
         val tab = tabs.getOrNull(currentIndex)

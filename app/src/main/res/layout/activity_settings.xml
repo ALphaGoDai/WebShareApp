@@ -324,7 +324,7 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="4dp"
-                    android:text="设一个地点和范围，打开 App 时人正好在这附近，就默认打开下面这个网址。比如走到「吕厝公交站」附近开 App，直接进乘车码那页。\n只看打开 App 那一刻的位置（不做后台定位、不上报）；没给位置权限、或者没拿到位置，就照常打开普通页面。"
+                    android:text="设一个地点和范围，打开 App 时人正好在这附近，就默认打开下面这个网址。比如走到「吕厝公交站」附近开 App，直接进乘车码那页。\n只看打开 App 那一刻的位置（不做后台定位、不上报），而且只认 1 分钟内的定位——没有就当场重新要一次（最多等 6 秒）；要是只拿到更早的位置（系统缓存里那条，人可能早走开了）就不判，照常打开普通页面。"
                     android:textSize="12sp"
                     android:textColor="?android:attr/textColorSecondary" />
 

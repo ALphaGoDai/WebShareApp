@@ -427,7 +427,7 @@ class SettingsActivity : AppCompatActivity() {
         refreshGeoUi()
     }
 
-    /** 要一次位置再干活：没权限先申请，拿到位置后回调（拿不到就提示一句） */
+    /** 要一次位置再干活：没权限先申请，拿到位置后回调（拿不到/只拿到旧位置就提示一句） */
     private fun withLocation(doneHint: String, use: (android.location.Location) -> Unit) {
         if (!GeoRule.hasPermission(this)) {
             pendingGeoAction = { withLocation(doneHint, use) }
@@ -438,15 +438,23 @@ class SettingsActivity : AppCompatActivity() {
         val oldText = btn.text
         btn.isEnabled = false
         btn.text = "定位中…"
-        GeoRule.requestSingle(this, 6000) { loc ->
+        GeoRule.requestSingle(this, 8000) { res ->
             btn.isEnabled = true
             btn.text = oldText
+            val loc = res.loc
             if (loc == null) {
-                snack("没拿到位置：确认手机定位已打开、或到窗边/室外再试")
+                snack(
+                    if (res.staleAgeMs > 0)
+                        "只拿到 ${GeoRule.describeAge(res.staleAgeMs)}，不是当前坐标（只认 1 分钟内的定位）：" +
+                                "到室外、或在手机设置里打开「高精度定位」再试一次"
+                    else
+                        "没拿到位置：确认手机定位已打开、或到窗边/室外再试"
+                )
+                refreshGeoUi()
                 return@requestSingle
             }
             use(loc)
-            snack("$doneHint（精度约 ${loc.accuracy.toInt()} 米，来自 ${loc.provider}）")
+            snack("$doneHint（精度约 ${loc.accuracy.toInt()} 米，来自 ${loc.provider}，${GeoRule.describeAge(GeoRule.ageMs(loc))}）")
             refreshGeoUi()
         }
     }
@@ -475,7 +483,7 @@ class SettingsActivity : AppCompatActivity() {
                 )
                 .setMessage(
                     "当前位置：${GeoRule.formatCoord(loc.latitude)}, ${GeoRule.formatCoord(loc.longitude)}" +
-                            "（${GeoRule.describeAccuracy(loc)}，来自 ${loc.provider}）\n" +
+                            "（${GeoRule.describeAccuracy(loc)}，来自 ${loc.provider}，${GeoRule.describeAge(GeoRule.ageMs(loc))}）\n" +
                             "目标位置：${GeoRule.formatCoord(lat)}, ${GeoRule.formatCoord(lng)}\n" +
                             "直线距离：${GeoRule.describe(d)}\n" +
                             "判定范围：$radius 米\n\n" +
