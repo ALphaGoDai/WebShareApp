@@ -14,8 +14,9 @@ object TabStore {
     /**
      * @param alias 用户长按标签标题设的备注名（空 = 没设）。它同时是语音快捷指令的名字：
      *              说「打开<App名><备注名>」就切到这个标签页，不用去设置里配。
+     * @param badge 底栏圆片单独设的「页面字」（空 = 按标题/备注名取第一个字）
      */
-    class SavedTab(val url: String, val title: String, val alias: String = "")
+    class SavedTab(val url: String, val title: String, val alias: String = "", val badge: String = "")
 
     class SavedState(val tabs: List<SavedTab>, val current: Int)
 
@@ -27,6 +28,7 @@ object TabStore {
         for (t in tabs) {
             val o = JSONObject().put("u", t.url).put("t", t.title)
             if (t.alias.isNotEmpty()) o.put("a", t.alias)
+            if (t.badge.isNotEmpty()) o.put("b", t.badge)
             arr.put(o)
         }
         val json = JSONObject().put("current", current).put("tabs", arr).toString()
@@ -46,7 +48,9 @@ object TabStore {
             for (i in 0 until arr.length()) {
                 val o = arr.optJSONObject(i) ?: continue
                 val u = o.optString("u")
-                if (u.isNotEmpty()) tabs.add(SavedTab(u, o.optString("t"), o.optString("a")))
+                if (u.isNotEmpty()) {
+                    tabs.add(SavedTab(u, o.optString("t"), o.optString("a"), o.optString("b")))
+                }
             }
             if (tabs.isEmpty()) return null
             SavedState(tabs, obj.optInt("current", 0).coerceIn(0, tabs.size - 1))

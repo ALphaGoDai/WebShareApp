@@ -88,6 +88,13 @@ class MainActivity : AppCompatActivity() {
     private var centerLongPress: Runnable? = null
     private var centerLongPressed = false
 
+    /**
+     * 电视上「网页」是一个控件：焦点刚落到网页上只是选中它（不显示光标、不响应方向键），
+     * 再按一次 OK 才进入页面内的光标模式。手机没有这个状态，始终为 true。
+     */
+    private var tvPageActive = false
+    private var tvPageHintShown = false
+
     /** 遥控器操作提示只弹一次（每进程） */
     private var tvHintShown = false
 
@@ -111,6 +118,9 @@ class MainActivity : AppCompatActivity() {
          * 「打开<应用名><备注名>」直接切到这一页，所以设了备注名的标签页会多出一条桌面快捷方式。
          */
         var alias: String? = null
+
+        /** 底栏圆片上显示的字（用户单独设的，和标题/别名无关；空 = 默认取标题首个字） */
+        var badge: String? = null
     }
 
     private val tabs = mutableListOf<Tab>()
@@ -438,7 +448,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** 工具栏每一项按「上」都回到网页；网页长按 OK 切出来落到三条线按钮 */
+    /** 工具栏每一项按「上」都回到网页；网页按「下」落到当前标签圆片（没有就落到三条线） */
     private fun bindTvFocusTargets(wv: WebView) {
         val wvId = wv.id
         if (wvId == View.NO_ID) return
@@ -452,23 +462,94 @@ class MainActivity : AppCompatActivity() {
         for (i in 0 until tabStrip.childCount) {
             tabStrip.getChildAt(i).nextFocusUpId = wvId
         }
-        wv.nextFocusDownId = R.id.menuButton
-        findViewById<View>(R.id.openAppGo).nextFocusDownId = R.id.menuButton
+        val down = currentChipId() ?: R.id.menuButton
+        wv.nextFocusDownId = down
+        findViewById<View>(R.id.openAppGo).nextFocusDownId = down
+        bindTabStripFocus()
     }
 
-    /** 长按 OK / 菜单键：光标让位，焦点交给工具栏 */
+    private fun currentChipId(): Int? =
+        tabStrip.getChildAt(currentIndex)?.takeIf { it.id != View.NO_ID }?.id
+
+    /**
+     * 标签圆片之间显式串成左右一条链：从三条线按钮按左能一路走到每一页，
+     * 避免 HorizontalScrollView 自己把焦点吃掉（真机上左右只滚动、选不中圆片）。
+     */
+    private fun bindTabStripFocus() {
+        if (!tvMode) return
+        val n = tabStrip.childCount
+        if (n == 0) {
+            menuButton.nextFocusLeftId = R.id.menuButton
+            return
+        }
+        for (i in 0 until n) {
+            val chip = tabStrip.getChildAt(i)
+            if (chip.id == View.NO_ID) chip.id = View.generateViewId()
+        }
+        val first = tabStrip.getChildAt(0).id
+        val last = tabStrip.getChildAt(n - 1).id
+        for (i in 0 until n) {
+            val chip = tabStrip.getChildAt(i)
+            chip.nextFocusLeftId = when {
+                i > 0 -> tabStrip.getChildAt(i - 1).id
+                tabScrollLeft.visibility == View.VISIBLE -> R.id.tabScrollLeft
+                else -> chip.id
+            }
+            chip.nextFocusRightId = when {
+                i < n - 1 -> tabStrip.getChildAt(i + 1).id
+                tabScrollRight.visibility == View.VISIBLE -> R.id.tabScrollRight
+                else -> R.id.menuButton
+            }
+        }
+        tabScrollLeft.nextFocusLeftId = R.id.tabScrollLeft
+        tabScrollLeft.nextFocusRightId = first
+        tabScrollRight.nextFocusLeftId = last
+        tabScrollRight.nextFocusRightId = R.id.menuButton
+        menuButton.nextFocusLeftId =
+            if (tabScrollRight.visibility == View.VISIBLE) R.id.tabScrollRight else last
+        menuButton.nextFocusRightId = R.id.menuButton
+        if (navMenu.visibility == View.VISIBLE) {
+            // 菜单开着时保持吸在菜单里（标题变化会重跑这里）
+            menuButton.nextFocusLeftId = R.id.menuButton
+            menuButton.nextFocusUpId = R.id.menuSettings
+        }
+    }
+
+    /** 进入/退出页面内的光标模式（电视）：光标只在「已按 OK 进入网页」后才显示 */
+    private fun setTvPageActive(active: Boolean) {
+        if (!tvMode) return
+        tvPageActive = active
+        tabs.getOrNull(currentIndex)?.webView?.let { wv ->
+            wv.evaluateJavascript("window.__wsTvShow&&window.__wsTvShow($active)", null)
+        }
+    }
+
+    private fun activateTvPage() {
+        if (tvPageActive) return
+        setTvPageActive(true)
+        if (!tvPageHintShown) {
+            tvPageHintShown = true
+            Toast.makeText(
+                this,
+                "已进入网页：方向键移动圆点，OK 点击；长按 OK / 菜单键回工具栏",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+    }
+
+    /** 长按 OK / 菜单键：光标让位，焦点交给工具栏（落在当前标签圆片上） */
     private fun focusNativeControls() {
         val wv = tabs.getOrNull(currentIndex)?.webView ?: return
+        setTvPageActive(false)
         blurPageEditing(wv)
-        wv.evaluateJavascript("window.__wsTvShow&&window.__wsTvShow(false)", null)
         val target = when {
             openAppBar.visibility == View.VISIBLE -> findViewById<View>(R.id.openAppGo)
-            else -> menuButton
+            else -> tabStrip.getChildAt(currentIndex) ?: menuButton
         }
         target.requestFocus()
         Toast.makeText(
             this,
-            "已切到工具栏：左右选标签页，OK 打开菜单；按 ↑ 或菜单键回到网页",
+            "已切到工具栏：左右选标签页，OK 切换；再往右是三条线菜单；按 ↑ 回到网页",
             Toast.LENGTH_SHORT
         ).show()
     }
@@ -497,8 +578,8 @@ class MainActivity : AppCompatActivity() {
         tvHintShown = true
         Toast.makeText(
             this,
-            "电视遥控：方向键移动光标 · OK 点击 · 长按 OK / 菜单键切到工具栏\n" +
-                "缓存视频：工具栏里长按「已下载」· 播放页：←/→ 快退快进 10 秒 · OK 暂停",
+            "电视遥控：方向键先选中按钮/网页，再按 OK 执行；网页要先按一次 OK 进入，方向键才移动光标\n" +
+                "长按 OK / 菜单键切到工具栏 · 缓存视频：菜单里长按「已下载」· 播放页：←/→ 快退快进 10 秒 · OK 暂停",
             Toast.LENGTH_LONG
         ).show()
     }
@@ -511,6 +592,7 @@ class MainActivity : AppCompatActivity() {
         super.onResume()
         if (!tvMode) return
         val wv = tabs.getOrNull(currentIndex)?.webView ?: return
+        tvPageActive = false
         wv.post {
             if (hasWindowFocus() && !pageEditing.get()) wv.requestFocus()
         }
@@ -518,7 +600,9 @@ class MainActivity : AppCompatActivity() {
 
     /**
      * 遥控器按键：
-     * - 网页有焦点时，方向键 → 页面里的虚拟光标；OK → 在光标处点击；长按 OK → 切到工具栏
+     * - 焦点刚落到网页上＝选中「网页」这个控件：不显示光标，方向键照常移焦点（↓ 回工具栏），
+     *   按一次 OK 才进入页面内的光标模式
+     * - 页面内：方向键移动虚拟光标；OK 在光标处点击；长按 OK 切到工具栏
      * - 菜单键（ACTION MENU）在网页和工具栏之间来回切
      * - 播放/快进/快退键直接控制页面里的 video
      * - 页面里正在输入文字（输入框有焦点）时，方向键原样交给 WebView
@@ -537,7 +621,12 @@ class MainActivity : AppCompatActivity() {
                 }
                 val wv = tabs.getOrNull(currentIndex)?.webView
                 if (wv != null) {
-                    if (wv.hasFocus()) focusNativeControls() else wv.requestFocus()
+                    if (wv.hasFocus()) {
+                        focusNativeControls()
+                    } else {
+                        setTvPageActive(false)
+                        wv.requestFocus()
+                    }
                 }
             }
             return true
@@ -564,6 +653,29 @@ class MainActivity : AppCompatActivity() {
         if (!hasWindowFocus() || !wv.hasFocus()) return super.dispatchKeyEvent(event)
         if (pageEditing.get()) return super.dispatchKeyEvent(event)
         if (isLocalPlayerPage(wv.url)) return super.dispatchKeyEvent(event)
+
+        // 网页只是被选中、还没进入：方向键不移动光标、也不让 WebView 拿去滚页面；
+        // 「下」离开网页回到工具栏，OK 才进入页面
+        if (!tvPageActive) {
+            when (key) {
+                KeyEvent.KEYCODE_DPAD_DOWN -> {
+                    if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                        (tabStrip.getChildAt(currentIndex) ?: menuButton).requestFocus()
+                    }
+                    return true
+                }
+                KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_LEFT,
+                KeyEvent.KEYCODE_DPAD_RIGHT -> return true
+                KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER,
+                KeyEvent.KEYCODE_NUMPAD_ENTER -> {
+                    if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                        activateTvPage()
+                    }
+                    return true
+                }
+                else -> return super.dispatchKeyEvent(event)
+            }
+        }
 
         when (key) {
             KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN,
@@ -1083,6 +1195,7 @@ class MainActivity : AppCompatActivity() {
             val tab = Tab(iface, wv, s.title.ifBlank { getString(R.string.app_name) }, s.url, null)
             tab.pendingUrl = s.url
             tab.alias = s.alias.takeIf { it.isNotEmpty() }
+            tab.badge = s.badge.takeIf { it.isNotEmpty() }
             tabs.add(tab)
         }
         currentIndex = saved.current
@@ -1130,34 +1243,56 @@ class MainActivity : AppCompatActivity() {
         return false
     }
 
-    /** 长按标签卡片标题栏：设/改/清这个标签页的备注名（留空确定 = 恢复原名） */
+    /** 长按标签卡片标题栏：编辑备注名（语音快捷指令用）+ 底栏圆片显示的「页面字」 */
     private fun editTabAlias(index: Int) {
         val tab = tabs.getOrNull(index) ?: return
-        val input = EditText(this)
-        input.setSingleLine(true)
-        input.setText(tab.alias ?: "")
-        input.hint = "备注名，留空恢复原名"
-        val current = tab.alias?.takeIf { it.isNotBlank() } ?: tab.title.ifBlank { "新标签页" }
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(8), dp(20), 0)
+        }
+
+        fun label(t: String) = TextView(this).apply {
+            text = t
+            textSize = 13f
+            setTextColor(Color.parseColor("#5F6368"))
+            setPadding(0, dp(10), 0, dp(2))
+        }
+
+        val aliasInput = EditText(this).apply {
+            setSingleLine(true)
+            setText(tab.alias ?: "")
+            hint = "例如：乘车码"
+        }
+        val badgeInput = EditText(this).apply {
+            setSingleLine(true)
+            setText(tab.badge ?: "")
+            hint = tabInitial(tab)   // 没设时这里就是默认会显示的字
+        }
+        box.addView(label("备注名（语音快捷指令用，留空恢复原名）"))
+        box.addView(aliasInput)
+        box.addView(label("页面字（底栏圆片只显示第一个字，留空＝按标题取首字）"))
+        box.addView(badgeInput)
+
         AlertDialog.Builder(this)
-            .setTitle("标签页备注名")
+            .setTitle("编辑标签页")
             .setMessage(
-                "给「$current」起个别名（例如「乘车码」）。设好之后：对小艺说「打开" +
-                    getString(R.string.app_name) + "」＋这个别名，就直接进这一页；" +
-                    "长按桌面图标也能看到这条快捷方式。留空确定＝恢复原来的标题。"
+                "备注名同时是语音快捷指令的名字：对小艺说「打开" + getString(R.string.app_name) +
+                    "」＋备注名就能直达这一页；页面字只影响底栏圆片显示，和网页标题无关。"
             )
-            .setView(input)
+            .setView(box)
             .setPositiveButton("确定") { _, _ ->
-                val v = input.text.toString().trim()
-                tab.alias = v.ifEmpty { null }
+                val aliasText = aliasInput.text.toString().trim()
+                val badgeText = badgeInput.text.toString().trim()
+                tab.alias = aliasText.ifEmpty { null }
+                tab.badge = badgeText.firstOrNull { !it.isWhitespace() }?.toString()
                 persistTabs()
                 syncVoiceShortcuts()
                 tabAdapter.notifyItemChanged(index)
                 updateTabStrip()
                 Toast.makeText(
                     this,
-                    if (v.isEmpty()) "已恢复原名"
-                    else "备注名：$v（桌面快捷方式已更新，可对小艺说「${getString(R.string.app_name)}$v」）",
-                    Toast.LENGTH_LONG
+                    "已保存：底栏圆片显示「${tabInitial(tab)}」",
+                    Toast.LENGTH_SHORT
                 ).show()
             }
             .setNegativeButton("取消", null)
@@ -1180,14 +1315,18 @@ class MainActivity : AppCompatActivity() {
         // 允许 Chrome 远程调试（chrome://inspect / adb forward），排查网页问题时必需
         WebView.setWebContentsDebuggingEnabled(true)
 
-        // 电视遥控：WebView 自己得能拿焦点，方向键才会落到页面上；
-        // 焦点在网页上时显示虚拟光标，切到工具栏时收起来
+        // 电视遥控：WebView 自己得能拿焦点，方向键才会落到页面上。
+        // 焦点刚落到网页上只是「选中这个控件」（画一圈焦点框），再按 OK 才显示光标进入页面。
         wv.isFocusable = true
         wv.isFocusableInTouchMode = true
         if (wv.id == View.NO_ID) wv.id = View.generateViewId()
+        if (tvMode) {
+            wv.foreground = ContextCompat.getDrawable(this, R.drawable.bg_tv_page_focus)
+        }
         wv.setOnFocusChangeListener { _, hasFocus ->
             if (tvMode) {
-                val show = if (hasFocus) "true" else "false"
+                if (!hasFocus) tvPageActive = false
+                val show = hasFocus && tvPageActive
                 wv.evaluateJavascript("window.__wsTvShow&&window.__wsTvShow($show)", null)
             }
         }
@@ -1525,7 +1664,7 @@ class MainActivity : AppCompatActivity() {
                         "tv page: url=$url bfSize=${bf.size} bfIndex=${bf.currentIndex} " +
                             "canGoBack=${view.canGoBack()} [$items]"
                     )
-                    val show = if (view.hasFocus()) "true" else "false"
+                    val show = if (view.hasFocus() && tvPageActive) "true" else "false"
                     view.evaluateJavascript("window.__wsTvShow&&window.__wsTvShow($show)", null)
                 }
                 // 记下标签页标题/地址，切换器卡片和角标用
@@ -1783,8 +1922,10 @@ class MainActivity : AppCompatActivity() {
         navMenu.translationY = dp(8).toFloat()
         navMenu.animate().alpha(1f).translationY(0f).setDuration(140).start()
         if (tvMode) {
-            // 菜单开着时，三条线按钮按「上」回到菜单最后一项，别跳回网页
+            // 菜单开着时，三条线按钮按「上」回到菜单最后一项，左右也被菜单吸住，别跳回网页/标签条
             menuButton.nextFocusUpId = R.id.menuSettings
+            menuButton.nextFocusLeftId = R.id.menuButton
+            menuButton.nextFocusRightId = R.id.menuButton
             findViewById<View>(R.id.menuRefresh).post {
                 findViewById<View>(R.id.menuRefresh).requestFocus()
             }
@@ -1798,6 +1939,7 @@ class MainActivity : AppCompatActivity() {
         if (tvMode) {
             val wvId = tabs.getOrNull(currentIndex)?.webView?.id ?: View.NO_ID
             if (wvId != View.NO_ID) menuButton.nextFocusUpId = wvId
+            bindTabStripFocus()
             if (menuButton.isShown) menuButton.requestFocus()
         }
     }
@@ -1825,8 +1967,9 @@ class MainActivity : AppCompatActivity() {
                     blurPageEditing(webView)
                     return
                 }
-                // 电视上焦点在工具栏（不在网页）时，返回先把焦点还给网页，别一按就退出
+                // 电视上焦点在工具栏（不在网页）时，返回先把焦点还给网页（只选中，不显示光标）
                 if (tvMode && !webView.hasFocus()) {
+                    setTvPageActive(false)
                     webView.requestFocus()
                     return
                 }
@@ -2040,6 +2183,7 @@ class MainActivity : AppCompatActivity() {
         hideTabSwitcher()
         persistTabs()
         if (tvMode) {
+            tvPageActive = false
             bindTvFocusTargets(wv)
             wv.requestFocus()
         }
@@ -2073,6 +2217,7 @@ class MainActivity : AppCompatActivity() {
                 )
             )
             if (tvMode) {
+                tvPageActive = false
                 bindTvFocusTargets(wv)
                 wv.requestFocus()
             }
@@ -2102,7 +2247,7 @@ class MainActivity : AppCompatActivity() {
             // 本机离线播放页（127.0.0.1/p/…）每次进程重启端口和令牌都会变，存下来也是死链
             if (isLocalPlayerPage(raw)) continue
             if (i == currentIndex) savedCurrent = saved.size
-            saved.add(TabStore.SavedTab(withoutSharedParam(raw), tab.title, tab.alias ?: ""))
+            saved.add(TabStore.SavedTab(withoutSharedParam(raw), tab.title, tab.alias ?: "", tab.badge ?: ""))
         }
         if (saved.isNotEmpty() && savedCurrent >= 0) {
             TabStore.save(this, saved, savedCurrent, commit)
@@ -2145,8 +2290,12 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** 标签页名字的第一个字（英文取大写首字母）：底栏位置窄，一个圆片就够了 */
+    /** 圆片上的字：优先用单独设的「页面字」，否则备注名/标题的第一个字（英文取大写） */
     private fun tabInitial(tab: Tab): String {
+        tab.badge?.trim()?.takeIf { it.isNotEmpty() }?.let { badge ->
+            val c = badge.firstOrNull { !it.isWhitespace() } ?: return "•"
+            return if (c.isLetter()) c.uppercaseChar().toString() else c.toString()
+        }
         val name = tab.alias?.takeIf { it.isNotBlank() } ?: tab.title
         // 书名号/引号这类开头没有信息量，取第一个「字」或数字
         val c = name.firstOrNull { it.isLetterOrDigit() }
@@ -2160,7 +2309,9 @@ class MainActivity : AppCompatActivity() {
      * 重建会打断滑动和遥控器焦点）；只换选中页时走下面那半段轻量更新。
      */
     private fun updateTabStrip() {
-        val names = tabs.map { (it.alias?.takeIf { a -> a.isNotBlank() } ?: it.title).trim() }
+        val names = tabs.map {
+            (it.alias ?: "") + "\u0002" + (it.badge ?: "") + "\u0002" + it.title
+        }
         val sig = names.joinToString("\u0001")
         if (sig != tabStripSignature || tabStrip.childCount != tabs.size) {
             tabStripSignature = sig
@@ -2188,6 +2339,7 @@ class MainActivity : AppCompatActivity() {
                     tabStrip.getChildAt(i).nextFocusUpId = wvId
                 }
             }
+            bindTabStripFocus()
         }
         if (currentIndex != revealedTabIndex) {
             revealedTabIndex = currentIndex
@@ -2214,6 +2366,7 @@ class MainActivity : AppCompatActivity() {
     private fun buildTabChip(tab: Tab): TextView {
         val size = dp(28)
         val chip = TextView(this)
+        chip.id = View.generateViewId()
         chip.text = tabInitial(tab)
         chip.gravity = Gravity.CENTER
         chip.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
@@ -2227,6 +2380,18 @@ class MainActivity : AppCompatActivity() {
         lp.marginStart = dp(3)
         lp.marginEnd = dp(3)
         chip.layoutParams = lp
+        if (tvMode) {
+            chip.setOnFocusChangeListener { _, hasFocus ->
+                if (hasFocus) {
+                    // 遥控器走到被遮住的圆片时，把它滚到中间
+                    tabScroll.post {
+                        val target = chip.left - (tabScroll.width - chip.width) / 2
+                        tabScroll.smoothScrollTo(target.coerceAtLeast(0), 0)
+                        updateTabScrollButtons()
+                    }
+                }
+            }
+        }
         chip.setOnClickListener {
             markOwnUi()
             val index = tabs.indexOf(tab)
@@ -2255,6 +2420,7 @@ class MainActivity : AppCompatActivity() {
         val canRight = tabScroll.canScrollHorizontally(1)
         tabScrollLeft.visibility = if (canLeft) View.VISIBLE else View.GONE
         tabScrollRight.visibility = if (canRight) View.VISIBLE else View.GONE
+        if (tvMode) bindTabStripFocus()
     }
 
     private fun scrollTabStrip(dir: Int) {
@@ -2289,6 +2455,7 @@ class MainActivity : AppCompatActivity() {
             (findViewById<View>(R.id.bottomBar) as ViewGroup).descendantFocusability =
                 ViewGroup.FOCUS_AFTER_DESCENDANTS
             webView.isFocusable = true
+            tvPageActive = false
             tabs.getOrNull(currentIndex)?.webView?.requestFocus()
         }
     }
