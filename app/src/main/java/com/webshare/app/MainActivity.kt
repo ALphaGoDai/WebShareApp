@@ -2777,7 +2777,7 @@ class MainActivity : AppCompatActivity() {
                 holder.itemView.isFocusable = true
                 holder.itemView.isFocusableInTouchMode = true
                 holder.itemView.foreground =
-                    ContextCompat.getDrawable(this@MainActivity, R.drawable.bg_tv_focus)
+                    ContextCompat.getDrawable(this@MainActivity, R.drawable.bg_tv_card_focus)
                 holder.close.isFocusable = true
                 holder.close.isFocusableInTouchMode = true
                 holder.close.foreground =

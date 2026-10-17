@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 电视切换器卡片的焦点框：浅紫底 + 深色外环 + 白色内环。
+     bg_tv_focus（浅紫描边）盖在同样是浅紫色的"当前页"卡片上几乎看不出来，
+     所以卡片单独用这套双环；和底栏标签圆片的 bg_tv_chip_focus 是同一个思路。 -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_focused="true">
+        <layer-list>
+            <item>
+                <shape android:shape="rectangle">
+                    <solid android:color="#1A6200EE" />
+                    <stroke
+                        android:width="3dp"
+                        android:color="#202124" />
+                    <corners android:radius="10dp" />
+                </shape>
+            </item>
+            <item
+                android:bottom="3dp"
+                android:left="3dp"
+                android:right="3dp"
+                android:top="3dp">
+                <shape android:shape="rectangle">
+                    <solid android:color="#00000000" />
+                    <stroke
+                        android:width="2dp"
+                        android:color="#FFFFFF" />
+                    <corners android:radius="7dp" />
+                </shape>
+            </item>
+        </layer-list>
+    </item>
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="#00000000" />
+        </shape>
+    </item>
+</selector>
