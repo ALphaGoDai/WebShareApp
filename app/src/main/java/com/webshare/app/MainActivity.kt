@@ -2018,7 +2018,7 @@ class MainActivity : AppCompatActivity() {
                         "back: 电视上没有上一页，先回工具栏（还有 ${tabs.size} 个标签页，再按返回退出）"
                     )
                     (tabStrip.getChildAt(currentIndex) ?: menuButton).requestFocus()
-                    Toast.makeText(this, "再按一次返回退出应用", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@MainActivity, "再按一次返回退出应用", Toast.LENGTH_SHORT).show()
                 } else {
                     // 手机：这一页没有上一页就退出应用，但绝不顺手关标签页——
                     // 用户要的是「返回键退出、页面还在」，关标签只能由他自己按 ✕。
