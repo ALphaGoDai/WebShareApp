@@ -951,4 +951,218 @@
     } catch (e) {}
   })();
 
+  // ---------------- 电视遥控：虚拟光标 ----------------
+  // 电视上没有触摸屏，很多网页又只认鼠标/触摸点击。这里在页面里画一个小圆点，
+  // 方向键移动、OK 点击；原生侧（MainActivity.dispatchKeyEvent）只负责转发方向。
+  // 位置用 fixed 定位，页面滚动后光标还停在屏幕同一处。
+  var tv = (function() {
+    var x = 0, y = 0, inited = false, visible = false, el = null;
+
+    // 一步走多远：电视 960px 宽时 24px，小屏最少 18px。步子别太大，否则
+    // 只有一行高的输入框会被"跨过去"（实测电视上 29px 的粘贴框就被跳过了）。
+    function step() {
+      return Math.max(18, Math.round(window.innerWidth / 40));
+    }
+
+    function ensure() {
+      if (el && el.parentNode) return el;
+      var host = document.body || document.documentElement;
+      if (!host) return null;
+      el = document.createElement('div');
+      el.id = '__wsTvCursor';
+      el.setAttribute('aria-hidden', 'true');
+      el.style.cssText =
+        'position:fixed;left:0;top:0;width:28px;height:28px;margin:-14px 0 0 -14px;' +
+        'border-radius:50%;box-sizing:border-box;border:2px solid #fff;' +
+        'background:rgba(98,0,238,.35);' +
+        'box-shadow:0 0 0 2px rgba(0,0,0,.6),0 2px 10px rgba(0,0,0,.55);' +
+        'z-index:2147483647;pointer-events:none;display:none;';
+      host.appendChild(el);
+      return el;
+    }
+
+    function place() {
+      var e = ensure();
+      if (!e) return;
+      e.style.transform = 'translate(' + Math.round(x) + 'px,' + Math.round(y) + 'px)';
+    }
+
+    function show(v) {
+      var e = ensure();
+      if (!e) return;
+      if (v && !inited) {
+        x = Math.round(window.innerWidth / 2);
+        y = Math.round(window.innerHeight / 2);
+        inited = true;
+        place();
+      }
+      visible = !!v;
+      e.style.display = visible ? 'block' : 'none';
+    }
+
+    function isEditable(node) {
+      if (!node) return false;
+      var tag = (node.tagName || '').toUpperCase();
+      if (tag === 'TEXTAREA' || tag === 'SELECT') return true;
+      if (tag === 'INPUT') {
+        var t = (node.type || '').toLowerCase();
+        return t !== 'button' && t !== 'submit' && t !== 'reset' &&
+               t !== 'checkbox' && t !== 'radio' && t !== 'range' && t !== 'file';
+      }
+      return !!node.isContentEditable;
+    }
+
+    /** 光标顶到屏幕边缘还继续按：先滚光标下面的滚动容器，再滚整个页面 */
+    function scrollAt(dirX, dirY) {
+      var px = Math.max(1, Math.min(window.innerWidth - 2, x));
+      var py = Math.max(1, Math.min(window.innerHeight - 2, y));
+      var node = null;
+      try { node = document.elementFromPoint(px, py); } catch (e) {}
+      var guard = 0;
+      while (node && guard++ < 12) {
+        var cs = null;
+        try { cs = getComputedStyle(node); } catch (e) {}
+        if (cs) {
+          if (dirX) {
+            var ox = cs.overflowX;
+            if (node.scrollWidth > node.clientWidth + 6 && /(auto|scroll)/.test(ox)) {
+              if (dirX > 0 && node.scrollLeft + node.clientWidth < node.scrollWidth - 2) {
+                node.scrollLeft += 120; return;
+              }
+              if (dirX < 0 && node.scrollLeft > 2) { node.scrollLeft -= 120; return; }
+            }
+          }
+          if (dirY) {
+            var oy = cs.overflowY;
+            if (node.scrollHeight > node.clientHeight + 6 && /(auto|scroll)/.test(oy)) {
+              if (dirY > 0 && node.scrollTop + node.clientHeight < node.scrollHeight - 2) {
+                node.scrollTop += 160; return;
+              }
+              if (dirY < 0 && node.scrollTop > 2) { node.scrollTop -= 160; return; }
+            }
+          }
+        }
+        node = node.parentElement;
+      }
+      try {
+        window.scrollBy(dirX ? (dirX > 0 ? 160 : -160) : 0,
+                        dirY ? (dirY > 0 ? 200 : -200) : 0);
+      } catch (e) {}
+    }
+
+    function move(dx, dy) {
+      if (!visible) show(true);
+      var s = step();
+      var margin = 6;
+      var nx = x + dx * s;
+      var ny = y + dy * s;
+      if (nx < margin) { nx = margin; if (dx < 0) scrollAt(-1, 0); }
+      else if (nx > window.innerWidth - margin) { nx = window.innerWidth - margin; if (dx > 0) scrollAt(1, 0); }
+      if (ny < margin) { ny = margin; if (dy < 0) scrollAt(0, -1); }
+      else if (ny > window.innerHeight - margin) { ny = window.innerHeight - margin; if (dy > 0) scrollAt(0, 1); }
+      x = nx; y = ny; place();
+    }
+
+    function click() {
+      var node = null;
+      try { node = document.elementFromPoint(x, y); } catch (e) {}
+      if (!node) return false;
+      var px = x, py = y;
+      try { if (node.focus) node.focus(); } catch (e) {}
+      function fire(type, Ctor) {
+        try {
+          var ev = new Ctor(type, {
+            bubbles: true, cancelable: true, composed: true, view: window,
+            clientX: px, clientY: py, screenX: px, screenY: py, button: 0,
+            buttons: (type === 'pointerdown' || type === 'mousedown') ? 1 : 0,
+            pointerType: 'mouse'
+          });
+          node.dispatchEvent(ev);
+        } catch (e) {}
+      }
+      var hasPointer = !!window.PointerEvent;
+      fire('pointerdown', hasPointer ? window.PointerEvent : window.MouseEvent);
+      fire('mousedown', window.MouseEvent);
+      fire('pointerup', hasPointer ? window.PointerEvent : window.MouseEvent);
+      fire('mouseup', window.MouseEvent);
+      // 真正触发默认动作（链接跳转、按钮提交、label 勾选…）
+      var target = node;
+      try {
+        var act = node.closest && node.closest(
+          'a,button,input,select,textarea,label,[onclick],[role="button"],[tabindex]');
+        if (act) target = act;
+      } catch (e) {}
+      try {
+        if (typeof target.click === 'function') target.click();
+        else if (typeof node.click === 'function') node.click();
+      } catch (e) {}
+      return true;
+    }
+
+    /** 媒体键 / 播放页按键：控制页面上第一个 video/audio */
+    function media(action) {
+      var v = document.querySelector('video,audio');
+      if (!v) return false;
+      try {
+        if (action === 'toggle') {
+          if (v.paused) { var p = v.play(); if (p && p.catch) p.catch(function() {}); }
+          else v.pause();
+        } else if (action === 'forward') {
+          v.currentTime = Math.min(v.duration || 1e9, (v.currentTime || 0) + 10);
+        } else if (action === 'rewind') {
+          v.currentTime = Math.max(0, (v.currentTime || 0) - 10);
+        }
+      } catch (e) {}
+      return true;
+    }
+
+    /** 光标位置 + 光标下面是不是输入框（原生要据此发触摸 / 弹键盘） */
+    function point() {
+      var node = null;
+      try { node = document.elementFromPoint(x, y); } catch (e) {}
+      return {
+        x: x,
+        y: y,
+        dpr: window.devicePixelRatio || 1,
+        w: window.innerWidth,
+        h: window.innerHeight,
+        editable: isEditable(node)
+      };
+    }
+
+    return {
+      show: show,
+      move: move,
+      click: click,
+      media: media,
+      point: point,
+      isEditable: function() { return isEditable(document.activeElement); },
+      isEditableNode: function(node) { return isEditable(node); }
+    };
+  })();
+
+  window.__wsTvShow = function(v) { tv.show(v); };
+  window.__wsTvMove = function(dx, dy) { tv.move(dx, dy); };
+  window.__wsTvClick = function() { return tv.click(); };
+  window.__wsTvMedia = function(a) { return tv.media(a); };
+  window.__wsTvIsEditable = function() { return tv.isEditable(); };
+  // 光标位置（CSS px）+ devicePixelRatio：原生据此发一个真实的触摸事件。
+  // 用合成 click() 的话 WebView 不认作用户手势，站点跳转会被当成"替换当前历史"，
+  // 表现就是按返回键直接退出、回不到上一页。真实触摸事件不会有这个问题。
+  window.__wsTvPoint = function() { return tv.point(); };
+
+  // 页面里的输入框拿到焦点时告诉原生：方向键该去操作文字，而不是移动光标。
+  // （Android 的 JS 桥方法在 WebView 的线程上调用，原生那边只写一个 volatile 标志）
+  try {
+    function reportTvEditing() {
+      try {
+        if (window.Android && window.Android.tvEditing) {
+          window.Android.tvEditing(tv.isEditable());
+        }
+      } catch (e) {}
+    }
+    document.addEventListener('focusin', reportTvEditing, true);
+    document.addEventListener('focusout', function() { setTimeout(reportTvEditing, 0); }, true);
+  } catch (e) {}
+
 })();

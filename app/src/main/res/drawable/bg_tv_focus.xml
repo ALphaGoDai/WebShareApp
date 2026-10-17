@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 电视上的焦点框：用遥控器移动焦点时，当前按钮外面有一圈紫色描边。
+     作为 foreground 盖在原来那张背景上（不替换点击水波纹）。 -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_focused="true">
+        <shape android:shape="rectangle">
+            <solid android:color="#226200EE" />
+            <stroke
+                android:width="2dp"
+                android:color="#B39DDB" />
+            <corners android:radius="10dp" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="#00000000" />
+        </shape>
+    </item>
+</selector>

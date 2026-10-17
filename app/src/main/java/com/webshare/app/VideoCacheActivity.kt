@@ -11,6 +11,7 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
@@ -31,11 +32,16 @@ class VideoCacheActivity : AppCompatActivity() {
 
     private var items: List<VideoCacheStore.Entry> = emptyList()
 
+    /** 电视上「保存到本地」更准确，而且所有可点的地方都要能用遥控器选中 */
+    private var tvMode = false
+
     private val dayFmt = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault())
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_videocache)
+
+        tvMode = TvMode.isTv(this)
 
         emptyView = findViewById(R.id.emptyView)
         clearButton = findViewById(R.id.btnClear)
@@ -43,6 +49,14 @@ class VideoCacheActivity : AppCompatActivity() {
 
         findViewById<ImageButton>(R.id.btnBack).setOnClickListener { finish() }
         clearButton.setOnClickListener { askClearAll() }
+        if (tvMode) {
+            val ring = ContextCompat.getDrawable(this, R.drawable.bg_tv_focus)
+            findViewById<View>(R.id.btnBack).foreground = ring
+            clearButton.isFocusable = true
+            clearButton.foreground = ContextCompat.getDrawable(this, R.drawable.bg_tv_focus)
+            findViewById<TextView>(R.id.tvHint).text =
+                "遥控器：OK 在光标处点视频；左右切按钮。网页里出现视频时，长按 OK 切到工具栏，再按「缓存」。"
+        }
 
         val list = findViewById<RecyclerView>(R.id.list)
         list.layoutManager = LinearLayoutManager(this)
@@ -66,6 +80,15 @@ class VideoCacheActivity : AppCompatActivity() {
         } else {
             val total = items.sumOf { if (it.size > 0) it.size else 0L }
             "${items.size} 个 · 共 ${DownloadService.fmtSize(total)}"
+        }
+        if (tvMode) {
+            // 遥控器进来就有落点：第一条（没有条目就落到返回）
+            val list = findViewById<RecyclerView>(R.id.list)
+            list.post {
+                val holder = list.findViewHolderForAdapterPosition(0)
+                val target: View = holder?.itemView ?: findViewById(R.id.btnBack)
+                if (!target.hasFocus()) target.requestFocus()
+            }
         }
     }
 
@@ -213,6 +236,20 @@ class VideoCacheActivity : AppCompatActivity() {
             holder.itemView.findViewById<View>(R.id.btnSave).setOnClickListener { saveToPhone(entry) }
             holder.itemView.findViewById<View>(R.id.btnShare).setOnClickListener { share(entry) }
             holder.itemView.findViewById<View>(R.id.btnDelete).setOnClickListener { askDelete(entry) }
+
+            if (tvMode) {
+                val ring = ContextCompat.getDrawable(this@VideoCacheActivity, R.drawable.bg_tv_focus)
+                holder.itemView.isFocusable = true
+                holder.itemView.foreground = ring
+                holder.itemView.findViewById<TextView>(R.id.btnSave).text = "保存到本地"
+                for (id in intArrayOf(R.id.btnPlay, R.id.btnSave, R.id.btnShare, R.id.btnDelete)) {
+                    val b = holder.itemView.findViewById<TextView>(id)
+                    b.isFocusable = true
+                    b.foreground = ContextCompat.getDrawable(
+                        this@VideoCacheActivity, R.drawable.bg_tv_focus
+                    )
+                }
+            }
         }
     }
 }

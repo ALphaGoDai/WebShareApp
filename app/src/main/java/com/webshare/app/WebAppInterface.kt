@@ -65,6 +65,14 @@ class WebAppInterface(private val context: Context) {
     /** 用户在系统文件选择器里选过的文件：文件名(+大小) -> content uri，供 multipart 上传取内容 */
     private val pickedFiles = ConcurrentHashMap<String, Uri>()
 
+    /**
+     * 电视遥控：页面里当前焦点是不是输入框。shim.js 在 focusin/focusout 时通过
+     * [tvEditing] 上报；有输入框在编辑时，方向键要留给 WebView 移动文字光标，
+     * 不能再被原生劫持去挪虚拟光标。
+     */
+    @Volatile
+    var tvEditingListener: ((Boolean) -> Unit)? = null
+
     fun setSharedContent(text: String, type: String) {
         sharedText = text
         sharedType = type
@@ -179,6 +187,15 @@ class WebAppInterface(private val context: Context) {
     /** 可用语音列表 JSON（[{name, lang}]），页面用它挑中文声音；调用即代表本页关心 voiceschanged */
     @JavascriptInterface
     fun ttsVoices(): String = TtsEngine.voicesJson(webViewRef)
+
+    /** shim.js 上报：页面里的输入框是否正在编辑（电视上决定方向键归谁） */
+    @JavascriptInterface
+    fun tvEditing(editing: Boolean) {
+        try {
+            tvEditingListener?.invoke(editing)
+        } catch (_: Exception) {
+        }
+    }
 
     /** 读剪贴板文本（非安全上下文里网页拿不到 navigator.clipboard，只能走桥接） */
     @JavascriptInterface

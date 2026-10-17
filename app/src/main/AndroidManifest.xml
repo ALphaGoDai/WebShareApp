@@ -19,6 +19,15 @@
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
 
+    <!-- Android TV：声明能吃遥控器、不强依赖触摸屏，否则电视桌面（Leanback）
+         根本不会把本应用列出来（装得上、但应用列表里找不到）。 -->
+    <uses-feature
+        android:name="android.software.leanback"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.touchscreen"
+        android:required="false" />
+
     <uses-feature
         android:name="android.hardware.microphone"
         android:required="false" />
@@ -63,6 +72,7 @@
         android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
+        android:banner="@drawable/tv_banner"
         android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@style/Theme.WebShareApp"
@@ -79,6 +89,12 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- 电视桌面（Leanback Launcher / Google TV）也要能找到本应用 -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
 
             <!-- 接收文本分享 -->

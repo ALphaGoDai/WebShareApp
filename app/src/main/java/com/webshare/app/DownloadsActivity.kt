@@ -17,6 +17,7 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import java.text.SimpleDateFormat
@@ -34,6 +35,9 @@ class DownloadsActivity : AppCompatActivity() {
     private lateinit var adapter: Adapter
     private lateinit var emptyView: View
     private lateinit var clearButton: TextView
+
+    /** 电视上所有可点的地方都要能用遥控器选中 */
+    private var tvMode = false
 
     private val poll = Handler(Looper.getMainLooper())
     private var lastSignature = ""
@@ -92,6 +96,19 @@ class DownloadsActivity : AppCompatActivity() {
         val list = findViewById<RecyclerView>(R.id.list)
         list.layoutManager = LinearLayoutManager(this)
         list.adapter = adapter
+        setupTvFocus()
+    }
+
+    /** 电视：顶栏和批量操作栏的按钮都要能用遥控器选中，并画出焦点框 */
+    private fun setupTvFocus() {
+        tvMode = TvMode.isTv(this)
+        if (!tvMode) return
+        val ring = ContextCompat.getDrawable(this, R.drawable.bg_tv_focus)
+        findViewById<View>(R.id.btnBack).foreground = ring
+        clearButton.isFocusable = true
+        clearButton.foreground = ContextCompat.getDrawable(this, R.drawable.bg_tv_focus)
+        selectAllButton.isFocusable = true
+        selectAllButton.foreground = ContextCompat.getDrawable(this, R.drawable.bg_tv_focus)
     }
 
     override fun onResume() {
@@ -465,6 +482,15 @@ class DownloadsActivity : AppCompatActivity() {
                 holder.delete.visibility = View.GONE
             } else {
                 holder.delete.visibility = View.VISIBLE
+            }
+            if (tvMode) {
+                val ring = ContextCompat.getDrawable(
+                    this@DownloadsActivity, R.drawable.bg_tv_focus
+                )
+                holder.itemView.isFocusable = true
+                holder.itemView.foreground = ring
+                holder.retry.foreground = ring
+                holder.delete.foreground = ring
             }
         }
 

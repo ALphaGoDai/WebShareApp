@@ -243,6 +243,23 @@ object LocalMediaServer {
   video{width:100%;background:#000;display:block;max-height:78vh}
   .note{padding:12px 14px 20px;color:#8b93a1;font-size:12px;line-height:1.7}
   .src{word-break:break-all;color:#6f7784}
+  .hint{position:fixed;left:0;right:0;bottom:22px;z-index:4;text-align:center;
+        color:#d9dce2;font-size:14px;text-shadow:0 1px 5px #000;
+        pointer-events:none;opacity:0;transition:opacity .35s}
+  .hud{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:5;
+       color:#fff;background:rgba(0,0,0,.62);padding:10px 22px;border-radius:999px;
+       font-size:20px;opacity:0;transition:opacity .18s;pointer-events:none}
+  /* 电视/大屏：视频铺满整屏，标题和提示浮在上面 */
+  @media (min-width:700px){
+    html,body{height:100%;overflow:hidden;background:#000}
+    .head{position:fixed;left:24px;right:24px;top:14px;z-index:3;padding:0;
+          font-size:22px;text-shadow:0 2px 10px #000}
+    .meta{position:fixed;left:24px;right:24px;top:52px;z-index:3;padding:0;
+          font-size:14px;text-shadow:0 1px 6px #000}
+    video{position:fixed;left:0;top:0;width:100vw;height:100vh;max-height:none;
+          object-fit:contain}
+    .note{display:none}
+  }
 </style></head>
 <body>
   <div class="head">$title</div>
@@ -250,6 +267,67 @@ object LocalMediaServer {
   <video src="$url" controls autoplay playsinline preload="auto"></video>
   <div class="note">这份视频存在 App 自己的目录里，在「缓存」页可以保存到手机或删掉。<br>
     来源：<span class="src">${esc(entry.pageUrl)}</span></div>
+  <div class="hint" id="hint">遥控器：←/→ 快退快进 10 秒 · OK 暂停/继续 · ↑/↓ 音量</div>
+  <div class="hud" id="hud"></div>
+<script>
+(function(){
+  var v = document.querySelector('video');
+  var hud = document.getElementById('hud');
+  var hint = document.getElementById('hint');
+  var hideTimer = null, hudTimer = null;
+
+  function flash(text) {
+    hud.textContent = text;
+    hud.style.opacity = '1';
+    clearTimeout(hudTimer);
+    hudTimer = setTimeout(function(){ hud.style.opacity = '0'; }, 700);
+  }
+  function showHint() {
+    hint.style.opacity = '1';
+    clearTimeout(hideTimer);
+    hideTimer = setTimeout(function(){ hint.style.opacity = '0'; }, 4500);
+  }
+  function play() {
+    var p = v.play();
+    if (p && p.catch) p.catch(function(){});
+  }
+  function toggle() {
+    if (v.paused) { play(); flash('播放'); } else { v.pause(); flash('暂停'); }
+  }
+  function seek(d) {
+    var max = isFinite(v.duration) ? v.duration : 1e9;
+    var t = Math.max(0, Math.min(max, (v.currentTime || 0) + d));
+    v.currentTime = t;
+    flash((d > 0 ? '+' : '') + d + ' 秒');
+  }
+  window.addEventListener('keydown', function(e){
+    var k = e.keyCode, used = true;
+    if (k === 37 || k === 227) seek(-10);                 // 左 / 快退
+    else if (k === 39 || k === 228) seek(10);             // 右 / 快进
+    else if (k === 38) {                                  // 上：音量 +
+      v.volume = Math.min(1, (v.volume || 0) + 0.1);
+      flash('音量 ' + Math.round(v.volume * 100) + '%');
+    } else if (k === 40) {                                // 下：音量 -
+      v.volume = Math.max(0, (v.volume || 0) - 0.1);
+      flash('音量 ' + Math.round(v.volume * 100) + '%');
+    } else if (k === 13 || k === 23 || k === 66 || k === 32 || k === 85 || k === 179) {
+      toggle();                                           // OK / 空格 / 播放暂停
+    } else {
+      used = false;
+    }
+    if (used) { e.preventDefault(); e.stopPropagation(); }
+    showHint();
+  }, true);
+
+  // 让页面本身拿得到按键（电视上 WebView 把按键交给当前焦点元素）
+  document.body.tabIndex = 0;
+  try { document.body.focus(); } catch (e) {}
+  document.addEventListener('click', function(){ try { document.body.focus(); } catch (e) {} });
+  v.addEventListener('loadedmetadata', showHint);
+  v.addEventListener('error', function(){ flash('这个视频解不开'); });
+  showHint();
+})();
+</script>
 </body></html>"""
     }
 }

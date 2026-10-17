@@ -12,9 +12,13 @@ import android.os.Bundle
 import android.os.SystemClock
 import android.provider.OpenableColumns
 import android.util.Log
+import android.view.KeyEvent
 import android.view.LayoutInflater
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
+import android.view.inputmethod.InputMethodManager
 import android.webkit.PermissionRequest
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
@@ -61,6 +65,25 @@ class MainActivity : AppCompatActivity() {
 
     /** 用户点过 ✕：这一页不再浮动条（换页/换标签页会重新判） */
     private var mediaDismissed = false
+
+    // ---------- 电视 / 遥控器 ----------
+
+    /** 电视（Leanback 桌面、无触摸屏）：开虚拟光标，方向键交给页面，工具栏靠长按 OK 过去 */
+    private var tvMode = false
+
+    /** 页面里的输入框正在编辑（shim.js 上报）：方向键归 WebView，别拿去挪光标 */
+    private val pageEditing = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** 长按 OK：等够时间就把焦点交给工具栏（而不是点击） */
+    private var centerLongPress: Runnable? = null
+    private var centerLongPressed = false
+
+    /** 遥控器操作提示只弹一次（每进程） */
+    private var tvHintShown = false
+
+    /** 网页全屏（<video> 全屏 / 自定义全屏元素）时挂在最上层的视图 */
+    private var customView: View? = null
+    private var customViewCallback: WebChromeClient.CustomViewCallback? = null
 
     /** 多标签页：每页一个独立 WebView 和桥接实例，切换时换入换出 */
     private inner class Tab(
@@ -235,6 +258,11 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        tvMode = detectTvMode()
+        if (tvMode) {
+            // 电视上看视频/网页别让系统到点休眠；电视本来也没有触摸屏
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
         setContentView(R.layout.activity_main)
 
         settingsManager = SettingsManager(this)
@@ -252,6 +280,7 @@ class MainActivity : AppCompatActivity() {
         setupOpenAppBar()
         setupMediaBar()
         setupBackNavigation()
+        if (tvMode) setupTvMode()
 
         // 系统 TTS：注入脚本里的 speechSynthesis 补丁靠它出声，早点初始化，页面一问就有嗓音
         TtsEngine.init(this)
@@ -288,7 +317,247 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         // MediaWatch 是个单例，回调里握着这个 Activity：不摘掉就是内存泄漏
         MediaWatch.onChange = null
+        centerLongPress?.let { tabs.getOrNull(currentIndex)?.webView?.removeCallbacks(it) }
+        centerLongPress = null
         super.onDestroy()
+    }
+
+    // ---------- 电视 / 遥控器 ----------
+
+    /**
+     * 是不是电视：Leanback 桌面 / 电视类型设备。也可以在命令行用
+     * `am start … --ez tv_mode true` 在手机上模拟（测试用，记住后一直生效）。
+     */
+    private fun detectTvMode(): Boolean {
+        if (intent?.getBooleanExtra("tv_mode", false) == true) {
+            getSharedPreferences("webshare_tv", MODE_PRIVATE)
+                .edit().putBoolean("forced", true).apply()
+        }
+        return TvMode.isTv(this)
+    }
+
+    private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+    /** 电视布局：加高底栏、放大字号、给所有工具按钮加焦点框，并让网页先拿到焦点 */
+    private fun setupTvMode() {
+        val bar = findViewById<View>(R.id.bottomBar)
+        bar.layoutParams = bar.layoutParams.apply { height = dp(64) }
+
+        val navIds = intArrayOf(
+            R.id.navSettings, R.id.navDownloads, R.id.navCache, R.id.navTabs, R.id.navRefresh
+        )
+        for (id in navIds) {
+            val item = findViewById<View>(id)
+            item.isFocusable = true
+            item.foreground = ContextCompat.getDrawable(this, R.drawable.bg_tv_focus)
+            val group = item as? ViewGroup ?: continue
+            for (i in 0 until group.childCount) {
+                when (val child = group.getChildAt(i)) {
+                    is TextView -> child.textSize = 12f
+                    is ImageView -> {
+                        val lp = child.layoutParams
+                        lp.width = dp(28)
+                        lp.height = dp(28)
+                        child.layoutParams = lp
+                    }
+                }
+            }
+        }
+
+        // 浮条往上挪一点，别被加高后的底栏盖住
+        val stack = findViewById<View>(R.id.popupStack)
+        (stack.layoutParams as? ViewGroup.MarginLayoutParams)?.bottomMargin = dp(76)
+
+        // 浮条上的按钮也参与焦点：长按 OK / 菜单键切到工具栏后，能按到「缓存」
+        for (id in intArrayOf(R.id.mediaGo, R.id.mediaClose, R.id.openAppGo, R.id.openAppClose)) {
+            val v = findViewById<View>(id)
+            v.isFocusable = true
+            v.foreground = ContextCompat.getDrawable(this, R.drawable.bg_tv_focus)
+        }
+        findViewById<View>(R.id.btnNewTab).apply {
+            isFocusable = true
+            foreground = ContextCompat.getDrawable(this@MainActivity, R.drawable.bg_tv_focus)
+        }
+
+        tabs.getOrNull(currentIndex)?.let {
+            bindTvFocusTargets(it.webView)
+            it.webView.requestFocus()
+        }
+        maybeShowTvHint()
+    }
+
+    /** 工具栏每一项按「上」都回到网页；网页长按 OK 切出来落到工具栏 */
+    private fun bindTvFocusTargets(wv: WebView) {
+        val wvId = wv.id
+        if (wvId == View.NO_ID) return
+        for (id in intArrayOf(
+            R.id.navSettings, R.id.navDownloads, R.id.navCache, R.id.navTabs, R.id.navRefresh,
+            R.id.mediaGo, R.id.openAppGo
+        )) {
+            findViewById<View>(id).nextFocusUpId = wvId
+        }
+        wv.nextFocusDownId = R.id.navRefresh
+        findViewById<View>(R.id.mediaGo).nextFocusDownId = R.id.navRefresh
+        findViewById<View>(R.id.openAppGo).nextFocusDownId = R.id.navRefresh
+    }
+
+    /** 长按 OK / 菜单键：光标让位，焦点交给工具栏（有「发现视频」就先到它上面） */
+    private fun focusNativeControls() {
+        val wv = tabs.getOrNull(currentIndex)?.webView ?: return
+        blurPageEditing(wv)
+        wv.evaluateJavascript("window.__wsTvShow&&window.__wsTvShow(false)", null)
+        val target = when {
+            mediaBar.visibility == View.VISIBLE -> findViewById<View>(R.id.mediaGo)
+            openAppBar.visibility == View.VISIBLE -> findViewById<View>(R.id.openAppGo)
+            else -> findViewById<View>(R.id.navRefresh)
+        }
+        target.requestFocus()
+        Toast.makeText(
+            this,
+            "已切到工具栏：左右选按钮、OK 按下；按 ↑ 或菜单键回到网页",
+            Toast.LENGTH_SHORT
+        ).show()
+    }
+
+    /**
+     * 结束网页里的输入状态：收起输入法、让焦点离开输入框，光标重新能用。
+     * 不做的话焦点会一直留在 <input> 上，方向键被当成"移光标"永远出不来。
+     */
+    private fun blurPageEditing(wv: WebView) {
+        if (!pageEditing.get()) return
+        try {
+            val imm = getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager
+            imm.hideSoftInputFromWindow(wv.windowToken, 0)
+        } catch (_: Exception) {
+        }
+        wv.evaluateJavascript(
+            "(function(){var a=document.activeElement;" +
+                "if(a&&a.blur)a.blur();else if(window.getSelection)window.getSelection().removeAllRanges();})()",
+            null
+        )
+        pageEditing.set(false)
+    }
+
+    private fun maybeShowTvHint() {
+        if (tvHintShown) return
+        tvHintShown = true
+        Toast.makeText(
+            this,
+            "电视遥控：方向键移动光标 · OK 点击 · 长按 OK / 菜单键切到工具栏\n" +
+                "播放页：←/→ 快退快进 10 秒 · OK 暂停",
+            Toast.LENGTH_LONG
+        ).show()
+    }
+
+    /** 本机离线播放页（127.0.0.1/p/…）：方向键留给页面自己（快进退/音量） */
+    private fun isLocalPlayerPage(url: String?): Boolean =
+        url != null && url.startsWith("http://127.0.0.1:") && url.contains("/p/")
+
+    override fun onResume() {
+        super.onResume()
+        if (!tvMode) return
+        val wv = tabs.getOrNull(currentIndex)?.webView ?: return
+        wv.post {
+            if (hasWindowFocus() && !pageEditing.get()) wv.requestFocus()
+        }
+    }
+
+    /**
+     * 遥控器按键：
+     * - 网页有焦点时，方向键 → 页面里的虚拟光标；OK → 在光标处点击；长按 OK → 切到工具栏
+     * - 菜单键（ACTION MENU）在网页和工具栏之间来回切
+     * - 播放/快进/快退键直接控制页面里的 video
+     * - 页面里正在输入文字（输入框有焦点）时，方向键原样交给 WebView
+     */
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (!tvMode) return super.dispatchKeyEvent(event)
+        // 网页全屏时把按键全交给全屏视图（视频控件自己会处理方向键/OK）
+        if (customView != null) return super.dispatchKeyEvent(event)
+        val key = event.keyCode
+
+        if (key == KeyEvent.KEYCODE_MENU || key == KeyEvent.KEYCODE_INFO) {
+            if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                val wv = tabs.getOrNull(currentIndex)?.webView
+                if (wv != null) {
+                    if (wv.hasFocus()) focusNativeControls() else wv.requestFocus()
+                }
+            }
+            return true
+        }
+
+        val wv = tabs.getOrNull(currentIndex)?.webView ?: return super.dispatchKeyEvent(event)
+
+        // 媒体键：页面上有视频就控制它
+        val mediaAction = when (key) {
+            KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.KEYCODE_MEDIA_PLAY,
+            KeyEvent.KEYCODE_MEDIA_PAUSE -> "toggle"
+            KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> "forward"
+            KeyEvent.KEYCODE_MEDIA_REWIND -> "rewind"
+            else -> null
+        }
+        if (mediaAction != null) {
+            if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                wv.evaluateJavascript("window.__wsTvMedia&&window.__wsTvMedia('$mediaAction')", null)
+            }
+            return true
+        }
+
+        // 对话框/输入法/别的窗口在前台时不抢键；输入框在编辑时方向键归网页
+        if (!hasWindowFocus() || !wv.hasFocus()) return super.dispatchKeyEvent(event)
+        if (pageEditing.get()) return super.dispatchKeyEvent(event)
+        if (isLocalPlayerPage(wv.url)) return super.dispatchKeyEvent(event)
+
+        when (key) {
+            KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN,
+            KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                if (event.action == KeyEvent.ACTION_DOWN) {
+                    val dx = when (key) {
+                        KeyEvent.KEYCODE_DPAD_LEFT -> -1
+                        KeyEvent.KEYCODE_DPAD_RIGHT -> 1
+                        else -> 0
+                    }
+                    val dy = when (key) {
+                        KeyEvent.KEYCODE_DPAD_UP -> -1
+                        KeyEvent.KEYCODE_DPAD_DOWN -> 1
+                        else -> 0
+                    }
+                    // 按住方向键连续移动时加速：前 6 步细调，之后每步 3 倍
+                    val mult = if (event.repeatCount >= 6) 3 else 1
+                    wv.evaluateJavascript(
+                        "window.__wsTvMove&&window.__wsTvMove(${dx * mult},${dy * mult})", null
+                    )
+                }
+                return true
+            }
+            KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER,
+            KeyEvent.KEYCODE_NUMPAD_ENTER -> {
+                when (event.action) {
+                    KeyEvent.ACTION_DOWN -> {
+                        if (event.repeatCount == 0) {
+                            centerLongPressed = false
+                            val runnable = Runnable {
+                                centerLongPressed = true
+                                focusNativeControls()
+                            }
+                            centerLongPress = runnable
+                            // 550ms：比普通点按长、又不至于让手慢的用户误触
+                            wv.postDelayed(runnable, 550)
+                        }
+                        return true
+                    }
+                    KeyEvent.ACTION_UP -> {
+                        centerLongPress?.let { wv.removeCallbacks(it) }
+                        centerLongPress = null
+                        if (!centerLongPressed) {
+                            tapAtCursor(wv)
+                        }
+                        centerLongPressed = false
+                        return true
+                    }
+                }
+            }
+        }
+        return super.dispatchKeyEvent(event)
     }
 
     // ---------- 登录状态（Cookie） ----------
@@ -852,6 +1121,21 @@ class MainActivity : AppCompatActivity() {
         // 允许 Chrome 远程调试（chrome://inspect / adb forward），排查网页问题时必需
         WebView.setWebContentsDebuggingEnabled(true)
 
+        // 电视遥控：WebView 自己得能拿焦点，方向键才会落到页面上；
+        // 焦点在网页上时显示虚拟光标，切到工具栏时收起来
+        wv.isFocusable = true
+        wv.isFocusableInTouchMode = true
+        if (wv.id == View.NO_ID) wv.id = View.generateViewId()
+        wv.setOnFocusChangeListener { _, hasFocus ->
+            if (tvMode) {
+                val show = if (hasFocus) "true" else "false"
+                wv.evaluateJavascript("window.__wsTvShow&&window.__wsTvShow($show)", null)
+            }
+        }
+        iface.tvEditingListener = { editing ->
+            if (tabs.getOrNull(currentIndex)?.iface === iface) pageEditing.set(editing)
+        }
+
         val settings = wv.settings
         settings.javaScriptEnabled = true
         settings.domStorageEnabled = true
@@ -886,6 +1170,48 @@ class MainActivity : AppCompatActivity() {
                 } else {
                     progressBar.visibility = View.GONE
                 }
+            }
+
+            /**
+             * 网页里的视频/元素请求全屏：把它挂到窗口最上层铺满整屏。
+             * 不实现的话，电视上点视频的「全屏」按钮完全没反应（手机上也是）。
+             */
+            override fun onShowCustomView(
+                view: View?,
+                callback: WebChromeClient.CustomViewCallback?
+            ) {
+                if (customView != null) {
+                    callback?.onCustomViewHidden()
+                    return
+                }
+                val decor = window.decorView as? FrameLayout
+                if (decor == null || view == null) {
+                    callback?.onCustomViewHidden()
+                    return
+                }
+                customView = view
+                customViewCallback = callback
+                decor.addView(
+                    view,
+                    FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        FrameLayout.LayoutParams.MATCH_PARENT
+                    )
+                )
+                mediaBar.visibility = View.GONE
+                hideOpenAppBar()
+                // 全屏时把系统栏也藏起来（电视上没有，手机上有效）
+                @Suppress("DEPRECATION")
+                decor.systemUiVisibility = (View.SYSTEM_UI_FLAG_FULLSCREEN
+                        or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                        or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                        or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                        or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                        or View.SYSTEM_UI_FLAG_LAYOUT_STABLE)
+            }
+
+            override fun onHideCustomView() {
+                hideCustomViewNow()
             }
 
             override fun onJsAlert(
@@ -1108,7 +1434,9 @@ class MainActivity : AppCompatActivity() {
         ) {
             override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
                 super.onPageStarted(view, url, favicon)
-                // 页面换了一页，上一条"打开 App"的提示就过期了
+                // 换页了：上一页的输入框编辑状态作废
+                pageEditing.set(false)
+                // 页面换了一页，上一条"打开 App"的提示就过期
                 hideOpenAppBar()
                 // 换页了：上一页发现的视频不再算这一页的，浮动条也收起来（新页面发现视频会再浮出来）
                 MediaWatch.clearView(view)
@@ -1129,6 +1457,21 @@ class MainActivity : AppCompatActivity() {
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
                 scheduleCookieFlush()   // 刚登录/刚拿到会话的 Cookie 及时落盘
+                // 电视：页面就绪后把光标画出来（前提是焦点确实在网页上）
+                if (tvMode && view != null) {
+                    val bf = view.copyBackForwardList()
+                    val items = (0 until bf.size).joinToString(" | ") {
+                        val item = bf.getItemAtIndex(it)
+                        "${item.url}@${it}"
+                    }
+                    Log.i(
+                        TAG,
+                        "tv page: url=$url bfSize=${bf.size} bfIndex=${bf.currentIndex} " +
+                            "canGoBack=${view.canGoBack()} [$items]"
+                    )
+                    val show = if (view.hasFocus()) "true" else "false"
+                    view.evaluateJavascript("window.__wsTvShow&&window.__wsTvShow($show)", null)
+                }
                 // 记下标签页标题/地址，切换器卡片和角标用
                 tabs.firstOrNull { it.webView === view }?.let { tab ->
                     tab.title = view?.title?.takeIf { it.isNotBlank() } ?: tab.title
@@ -1377,19 +1720,134 @@ class MainActivity : AppCompatActivity() {
     private fun setupBackNavigation() {
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
+                // 网页全屏时，返回先退出全屏
+                if (customView != null) {
+                    hideCustomViewNow()
+                    return
+                }
                 // 标签页切换器开着时，返回先关它
                 if (tabSwitcher.visibility == View.VISIBLE) {
                     hideTabSwitcher()
                     return
                 }
-                if (webView.canGoBack()) {
-                    webView.goBack()
+                // 电视上正在输入框里打字：返回先退出输入状态（收键盘、光标恢复可用）
+                if (tvMode && pageEditing.get()) {
+                    blurPageEditing(webView)
+                    return
+                }
+                // 电视上焦点在工具栏（不在网页）时，返回先把焦点还给网页，别一按就退出
+                if (tvMode && !webView.hasFocus()) {
+                    webView.requestFocus()
+                    return
+                }
+                // 注意：有些 WebView 版本 canGoBack() 会撒谎（列表明明有上一页却一直 false，
+                // 系统 WebView 132 上就复现了），goBackOrForward(-1) 也跟着不动。
+                // 可靠的办法是让页面自己 history.back()（Chromium 的 Blink 历史是准的）；
+                // 万一页面没有 JS（PDF 之类），再退回原生 goBackOrForward。
+                val bf = webView.copyBackForwardList()
+                if (bf.currentIndex > 0) {
+                    Log.i(TAG, "back: 回上一页（index=${bf.currentIndex}/${bf.size}）")
+                    val before = webView.url
+                    webView.evaluateJavascript("history.back()", null)
+                    webView.postDelayed({
+                        if (webView.url == before) {
+                            Log.i(TAG, "back: history.back() 没动静，退回原生 goBackOrForward(-1)")
+                            webView.goBackOrForward(-1)
+                        }
+                    }, 450)
+                } else if (tabs.size > 1) {
+                    // 这一页没有上一页，但还开着别的标签页：返回 = 关掉当前标签页（播放页看完返回上一页）
+                    Log.i(TAG, "back: 关闭当前标签页（还有 ${tabs.size} 个）")
+                    closeTab(currentIndex)
                 } else {
-                    isEnabled = false
-                    onBackPressedDispatcher.onBackPressed()
+                    // 退出直接 finish()：不要用 isEnabled=false + onBackPressed() 那套——
+                    // 任务只是退到后台时 Activity 还活着，回调却一直停用，下次回来返回键会直接退出。
+                    Log.i(
+                        TAG,
+                        "back: 没有上一页，退出（bfSize=${bf.size}, index=${bf.currentIndex}, url=${webView.url}）"
+                    )
+                    finish()
                 }
             }
         })
+    }
+
+    /** 退出网页全屏：摘掉最上层那个视图，恢复系统栏和网页焦点 */
+    private fun hideCustomViewNow() {
+        val view = customView ?: return
+        (window.decorView as? FrameLayout)?.removeView(view)
+        customView = null
+        @Suppress("DEPRECATION")
+        window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
+        customViewCallback?.onCustomViewHidden()
+        customViewCallback = null
+        if (tvMode) tabs.getOrNull(currentIndex)?.webView?.requestFocus()
+    }
+
+    /**
+     * 在虚拟光标的位置给 WebView 发一个真实的触摸 tap。
+     *
+     * 不能只靠页面里的合成 click：WebView 不把脚本点击当用户手势，站内跳转会被当成
+     * "替换当前历史"，表现就是光标点开的页面一按返回键直接退出、回不到上一页。
+     * 真实触摸事件走 Chromium 的手势识别，链接跳转/表单提交/输入框聚焦都和手指点一样。
+     */
+    private fun tapAtCursor(wv: WebView) {
+        wv.evaluateJavascript("window.__wsTvPoint?JSON.stringify(window.__wsTvPoint()):''") { raw ->
+            val inner = try {
+                org.json.JSONTokener(raw ?: "").nextValue() as? String
+            } catch (e: Exception) {
+                null
+            }
+            val obj = try {
+                if (inner.isNullOrEmpty()) null else org.json.JSONObject(inner)
+            } catch (e: Exception) {
+                null
+            }
+            if (obj == null) {
+                // 页面没注入光标脚本：退回页面内合成点击（至少能点，历史问题只在极少数页面出现）
+                wv.evaluateJavascript("window.__wsTvClick&&window.__wsTvClick()", null)
+                return@evaluateJavascript
+            }
+            val dprRaw = obj.optDouble("dpr", 1.0).toFloat()
+            val dpr = if (dprRaw > 0f) dprRaw else 1f
+            val maxX = (wv.width - 2).coerceAtLeast(1).toFloat()
+            val maxY = (wv.height - 2).coerceAtLeast(1).toFloat()
+            val x = (obj.optDouble("x", 0.0).toFloat() * dpr).coerceIn(1f, maxX)
+            val y = (obj.optDouble("y", 0.0).toFloat() * dpr).coerceIn(1f, maxY)
+            val downTime = SystemClock.uptimeMillis()
+            try {
+                val down = MotionEvent.obtain(
+                    downTime, downTime, MotionEvent.ACTION_DOWN, x, y, 0
+                )
+                wv.dispatchTouchEvent(down)
+                down.recycle()
+                wv.postDelayed({
+                    val up = MotionEvent.obtain(
+                        downTime, SystemClock.uptimeMillis(), MotionEvent.ACTION_UP, x, y, 0
+                    )
+                    wv.dispatchTouchEvent(up)
+                    up.recycle()
+                }, 40)
+                // 点到输入框：主动把软键盘叫出来。电视上没有实体键盘，WebView 有时
+                // 只把焦点给了 <input> 却不弹输入法（MuMu/部分电视复现），这里补一手。
+                // 注意别 wv.requestFocus()：WebView 会顺手把键盘焦点还给页面上第一个
+                // 可聚焦元素（真实复现：输入框刚拿到焦点就被挪到按钮上）。
+                if (obj.optBoolean("editable", false)) {
+                    wv.postDelayed({
+                        try {
+                            val imm = getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager
+                            if (!imm.isActive(wv)) {
+                                imm.showSoftInput(wv, 0)
+                            }
+                        } catch (e: Exception) {
+                            Log.w(TAG, "弹输入法失败: ${e.message}")
+                        }
+                    }, 300)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "tv tap 失败: ${e.message}")
+            }
+        }
     }
 
     private fun loadUrl(force: Boolean = false) {
@@ -1492,6 +1950,10 @@ class MainActivity : AppCompatActivity() {
         hideTabSwitcher()
         persistTabs()
         refreshMediaBar()   // 切过来的这一页可能已经发现过视频
+        if (tvMode) {
+            bindTvFocusTargets(wv)
+            wv.requestFocus()
+        }
     }
 
     private fun closeTab(index: Int) {
@@ -1521,6 +1983,10 @@ class MainActivity : AppCompatActivity() {
                     FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT
                 )
             )
+            if (tvMode) {
+                bindTvFocusTargets(wv)
+                wv.requestFocus()
+            }
         }
         updateTabBadge()
         tabAdapter.notifyDataSetChanged()
@@ -1544,6 +2010,8 @@ class MainActivity : AppCompatActivity() {
         var savedCurrent = -1
         for ((i, tab) in tabs.withIndex()) {
             val raw = tab.url ?: tab.pendingUrl ?: continue
+            // 本机离线播放页（127.0.0.1/p/…）每次进程重启端口和令牌都会变，存下来也是死链
+            if (isLocalPlayerPage(raw)) continue
             if (i == currentIndex) savedCurrent = saved.size
             saved.add(TabStore.SavedTab(withoutSharedParam(raw), tab.title, tab.alias ?: ""))
         }
@@ -1596,10 +2064,29 @@ class MainActivity : AppCompatActivity() {
         captureThumb(tabs[currentIndex])
         tabAdapter.notifyDataSetChanged()
         tabSwitcher.visibility = View.VISIBLE
+        if (tvMode) {
+            // 切换器是整屏浮层：把底栏和网页的焦点挡掉，遥控器才不会"穿"到
+            // 浮层后面把「已下载」按了（真实复现：在切换器里按 ↓ 再 OK 打开了已下载页）
+            (findViewById<View>(R.id.bottomBar) as ViewGroup).descendantFocusability =
+                ViewGroup.FOCUS_BLOCK_DESCENDANTS
+            webView.isFocusable = false
+            // 让遥控器直接落到当前标签页的卡片上；空网格则落到「新建标签页」
+            tabGrid.post {
+                val holder = tabGrid.findViewHolderForAdapterPosition(currentIndex)
+                val target: View = holder?.itemView ?: findViewById(R.id.btnNewTab)
+                target.requestFocus()
+            }
+        }
     }
 
     private fun hideTabSwitcher() {
         tabSwitcher.visibility = View.GONE
+        if (tvMode) {
+            (findViewById<View>(R.id.bottomBar) as ViewGroup).descendantFocusability =
+                ViewGroup.FOCUS_AFTER_DESCENDANTS
+            webView.isFocusable = true
+            tabs.getOrNull(currentIndex)?.webView?.requestFocus()
+        }
     }
 
     /** 新建标签页：弹出地址栏（右侧「访问」），回车或点访问都会跳转；下方列最近访问过的 5 个地址 */
@@ -1642,6 +2129,12 @@ class MainActivity : AppCompatActivity() {
                     setPadding(0, pad, 0, pad)
                     background = selectableBackground()
                     setOnClickListener { dialog.dismiss(); openAddressInNewTab(addr) }
+                    if (this@MainActivity.tvMode) {
+                        isFocusable = true
+                        foreground = ContextCompat.getDrawable(
+                            this@MainActivity, R.drawable.bg_tv_focus
+                        )
+                    }
                 }
                 val del = ImageButton(this).apply {
                     setImageResource(R.drawable.ic_nav_close)
@@ -1753,6 +2246,15 @@ class MainActivity : AppCompatActivity() {
             holder.header.setOnLongClickListener {
                 editTabAlias(position)
                 true
+            }
+            if (tvMode) {
+                // 电视：整张卡片和关闭按钮都要能被遥控器选中
+                holder.itemView.isFocusable = true
+                holder.itemView.foreground =
+                    ContextCompat.getDrawable(this@MainActivity, R.drawable.bg_tv_focus)
+                holder.close.isFocusable = true
+                holder.close.foreground =
+                    ContextCompat.getDrawable(this@MainActivity, R.drawable.bg_tv_focus)
             }
         }
     }
