@@ -1967,6 +1967,12 @@ class MainActivity : AppCompatActivity() {
                     blurPageEditing(webView)
                     return
                 }
+                // 电视上光标已经在页面里（鼠标模式）：返回先退出光标模式，回到「网页被选中」，
+                // 不要把整个页面/应用退掉——在页面上按返回就退出应用，用户会以为标签丢了
+                if (tvMode && tvPageActive) {
+                    setTvPageActive(false)
+                    return
+                }
                 // 电视上焦点在工具栏（不在网页）时，返回先把焦点还给网页（只选中，不显示光标）
                 if (tvMode && !webView.hasFocus()) {
                     setTvPageActive(false)
@@ -2380,6 +2386,14 @@ class MainActivity : AppCompatActivity() {
         chip.layoutParams = lp
         if (tvMode) {
             chip.setOnFocusChangeListener { _, hasFocus ->
+                // 圆片只有 28dp，光靠描边不够醒目：聚焦时放大并抬到相邻圆片上面，
+                // 遥控器左右选页时能清楚看到焦点落在哪一片
+                chip.animate()
+                    .scaleX(if (hasFocus) 1.3f else 1f)
+                    .scaleY(if (hasFocus) 1.3f else 1f)
+                    .setDuration(90)
+                    .start()
+                chip.translationZ = if (hasFocus) dp(6).toFloat() else 0f
                 if (hasFocus) {
                     // 遥控器走到被遮住的圆片时，把它滚到中间
                     tabScroll.post {
@@ -2405,7 +2419,8 @@ class MainActivity : AppCompatActivity() {
             true
         }
         if (tvMode) {
-            chip.foreground = ContextCompat.getDrawable(this, R.drawable.bg_tv_focus)
+            // 标签圆片专用焦点框（深色外圈 + 白内圈），普通按钮的淡紫描边在紫圆片上看不见
+            chip.foreground = ContextCompat.getDrawable(this, R.drawable.bg_tv_chip_focus)
             val wvId = tabs.getOrNull(currentIndex)?.webView?.id ?: View.NO_ID
             if (wvId != View.NO_ID) chip.nextFocusUpId = wvId
         }
