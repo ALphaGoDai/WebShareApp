@@ -96,6 +96,8 @@ class MainActivity : AppCompatActivity() {
     private var tvPageHintShown = false
     /** 电视上从网页按返回落到工具栏后，再按一次返回才退出（避免按一下返回就把 App 退了） */
     private var tvBackArmedForExit = false
+    /** 电视切换器里当前焦点所在的卡片（「编辑 / 关闭」操作条作用于它） */
+    private var switcherFocusPosition = 0
 
     /** 遥控器操作提示只弹一次（每进程） */
     private var tvHintShown = false
@@ -577,6 +579,53 @@ class MainActivity : AppCompatActivity() {
         pageEditing.set(false)
     }
 
+    /**
+     * 电视没有实体键盘：原生 EditText 通过遥控器拿到焦点后，主动把电视输入法叫出来。
+     * （只靠系统默认行为时，有些电视要把 OK 按两次才弹，或者干脆不弹。）
+     */
+    private fun attachTvIme(edit: EditText) {
+        if (!tvMode) return
+        edit.setOnFocusChangeListener { v, hasFocus ->
+            if (hasFocus) {
+                v.postDelayed({
+                    try {
+                        val imm = getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager
+                        imm.showSoftInput(v, InputMethodManager.SHOW_IMPLICIT)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "原生输入框弹输入法失败: ${e.message}")
+                    }
+                }, 150)
+            }
+        }
+    }
+
+    /** 打开对话框后把焦点和输入法直接送到输入框（电视上默认焦点常落在按钮上） */
+    private fun showTvImeNow(v: View) {
+        if (!tvMode) return
+        v.postDelayed({
+            v.requestFocus()
+            try {
+                val imm = getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager
+                imm.showSoftInput(v, InputMethodManager.SHOW_IMPLICIT)
+            } catch (e: Exception) {
+                Log.w(TAG, "对话框输入框弹输入法失败: ${e.message}")
+            }
+        }, 250)
+    }
+
+    /** 网页里的输入框：叫电视输入法；第一下常常只唤起窗口不显示，隔一会儿再补 */
+    private fun showImeForWebView(wv: WebView, attempt: Int = 0) {
+        try {
+            val imm = getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager
+            imm.showSoftInput(wv, InputMethodManager.SHOW_IMPLICIT)
+            if (!imm.isActive(wv) && attempt < 2) {
+                wv.postDelayed({ showImeForWebView(wv, attempt + 1) }, 450)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "网页输入框弹输入法失败: ${e.message}")
+        }
+    }
+
     private fun maybeShowTvHint() {
         if (tvHintShown) return
         tvHintShown = true
@@ -616,6 +665,15 @@ class MainActivity : AppCompatActivity() {
         if (!tvMode) return super.dispatchKeyEvent(event)
         // 网页全屏时把按键全交给全屏视图（视频控件自己会处理方向键/OK）
         if (customView != null) return super.dispatchKeyEvent(event)
+        // 标签页切换器是整屏浮层：按键归浮层。焦点没进去时先塞到「新建标签页」，
+        // 否则下面的网页逻辑会把方向键吃掉（旧版就是这样，遥控器根本走不进卡片）。
+        if (tabSwitcher.visibility == View.VISIBLE) {
+            if (!tabSwitcher.hasFocus()) {
+                findViewById<View>(R.id.btnNewTab).requestFocus()
+                return true
+            }
+            return super.dispatchKeyEvent(event)
+        }
         val key = event.keyCode
 
         if (key == KeyEvent.KEYCODE_MENU || key == KeyEvent.KEYCODE_INFO) {
@@ -1277,8 +1335,10 @@ class MainActivity : AppCompatActivity() {
         box.addView(aliasInput)
         box.addView(label("页面字（底栏圆片只显示第一个字，切换器卡片标题前也会用【】标出；留空＝按标题取首字、卡片不显示括号）"))
         box.addView(badgeInput)
+        attachTvIme(aliasInput)
+        attachTvIme(badgeInput)
 
-        AlertDialog.Builder(this)
+        val dialog = AlertDialog.Builder(this)
             .setTitle("编辑标签页")
             .setMessage(
                 "备注名同时是语音快捷指令的名字：对小艺说「打开" + getString(R.string.app_name) +
@@ -1301,7 +1361,10 @@ class MainActivity : AppCompatActivity() {
                 ).show()
             }
             .setNegativeButton("取消", null)
-            .show()
+            .create()
+        dialog.show()
+        // 电视上打开就把焦点和输入法送到第一个输入框，不用再用遥控器找
+        showTvImeNow(aliasInput)
     }
 
     /** 新建一个标签页（建好即成为当前页）；起始地址由调用方决定 */
@@ -2095,16 +2158,7 @@ class MainActivity : AppCompatActivity() {
                 // 注意别 wv.requestFocus()：WebView 会顺手把键盘焦点还给页面上第一个
                 // 可聚焦元素（真实复现：输入框刚拿到焦点就被挪到按钮上）。
                 if (obj.optBoolean("editable", false)) {
-                    wv.postDelayed({
-                        try {
-                            val imm = getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager
-                            if (!imm.isActive(wv)) {
-                                imm.showSoftInput(wv, 0)
-                            }
-                        } catch (e: Exception) {
-                            Log.w(TAG, "弹输入法失败: ${e.message}")
-                        }
-                    }, 300)
+                    wv.postDelayed({ showImeForWebView(wv) }, 300)
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "tv tap 失败: ${e.message}")
@@ -2250,7 +2304,8 @@ class MainActivity : AppCompatActivity() {
                 tvPageActive = false
                 tvBackArmedForExit = false
                 bindTvFocusTargets(wv)
-                wv.requestFocus()
+                // 在切换器里关掉当前页时别把焦点抢回网页，否则遥控器就困在网页上了
+                if (tabSwitcher.visibility != View.VISIBLE) wv.requestFocus()
             }
         }
         updateTabStrip()
@@ -2473,6 +2528,7 @@ class MainActivity : AppCompatActivity() {
         hideNavMenu()
         captureThumb(tabs[currentIndex])
         tabAdapter.notifyDataSetChanged()
+        switcherFocusPosition = currentIndex
         tabSwitcher.visibility = View.VISIBLE
         if (tvMode) {
             // 切换器是整屏浮层：把底栏和网页的焦点挡掉，遥控器才不会"穿"到
@@ -2480,13 +2536,54 @@ class MainActivity : AppCompatActivity() {
             (findViewById<View>(R.id.bottomBar) as ViewGroup).descendantFocusability =
                 ViewGroup.FOCUS_BLOCK_DESCENDANTS
             webView.isFocusable = false
-            // 让遥控器直接落到当前标签页的卡片上；空网格则落到「新建标签页」
-            tabGrid.post {
-                val holder = tabGrid.findViewHolderForAdapterPosition(currentIndex)
-                val target: View = holder?.itemView ?: findViewById(R.id.btnNewTab)
-                target.requestFocus()
+            webView.clearFocus()
+            // 电视上给当前卡片一个明确的「编辑 / 关闭」入口（右上角 ✕ 太小，
+            // 焦点也很难从整张卡片钻进那个角落）
+            val edit = findViewById<TextView>(R.id.switcherEdit)
+            val close = findViewById<TextView>(R.id.switcherClose)
+            edit.visibility = View.VISIBLE
+            close.visibility = View.VISIBLE
+            edit.foreground = ContextCompat.getDrawable(this, R.drawable.bg_tv_focus)
+            close.foreground = ContextCompat.getDrawable(this, R.drawable.bg_tv_focus)
+            findViewById<View>(R.id.btnNewTab).foreground =
+                ContextCompat.getDrawable(this, R.drawable.bg_tv_focus)
+            edit.nextFocusRightId = R.id.switcherClose
+            close.nextFocusLeftId = R.id.switcherEdit
+            close.nextFocusRightId = R.id.switcherClose
+            edit.setOnClickListener {
+                val p = switcherFocusPosition
+                if (p in tabs.indices) editTabAlias(p)
             }
+            close.setOnClickListener { closeSwitcherFocusedTab() }
+            // 让遥控器直接落到当前标签页的卡片标题上；网格还没布局好就等一帧再试
+            tabGrid.scrollToPosition(currentIndex)
+            tabGrid.postDelayed({
+                val holder = tabGrid.findViewHolderForAdapterPosition(currentIndex)
+                val target: View = holder?.header ?: holder?.itemView
+                    ?: findViewById(R.id.btnNewTab)
+                target.requestFocus()
+            }, 120)
+        } else {
+            findViewById<View>(R.id.switcherEdit).visibility = View.GONE
+            findViewById<View>(R.id.switcherClose).visibility = View.GONE
         }
+    }
+
+    /** 电视切换器「关闭」：关掉当前焦点所在的卡片；关完把焦点挪到下一张 */
+    private fun closeSwitcherFocusedTab() {
+        val p = switcherFocusPosition
+        if (p !in tabs.indices) return
+        val last = tabs.size == 1
+        closeTab(p)
+        if (last) return
+        val next = p.coerceAtMost(tabs.lastIndex)
+        switcherFocusPosition = next
+        tabGrid.postDelayed({
+            val holder = tabGrid.findViewHolderForAdapterPosition(next)
+            val target: View = holder?.header ?: holder?.itemView
+                ?: findViewById(R.id.btnNewTab)
+            target.requestFocus()
+        }, 150)
     }
 
     private fun hideTabSwitcher() {
@@ -2576,6 +2673,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         refreshHistory()
+        attachTvIme(input)
         go.setOnClickListener { launch() }
         input.setOnEditorActionListener { _, actionId, _ ->
             if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_GO) {
@@ -2587,6 +2685,7 @@ class MainActivity : AppCompatActivity() {
         }
         dialog.show()
         input.selectAll()
+        showTvImeNow(input)
     }
 
     /** 取主题里的触摸反馈背景（attr 不能直接 setBackgroundResource，得先解析成 drawable） */
@@ -2670,6 +2769,22 @@ class MainActivity : AppCompatActivity() {
                 holder.close.isFocusable = true
                 holder.close.foreground =
                     ContextCompat.getDrawable(this@MainActivity, R.drawable.bg_tv_focus)
+                // 记住焦点在哪张卡片上：切换器底部的「编辑 / 关闭」作用于它
+                holder.itemView.setOnFocusChangeListener { _, hasFocus ->
+                    if (hasFocus) switcherFocusPosition = position
+                }
+                holder.header.setOnFocusChangeListener { _, hasFocus ->
+                    if (hasFocus) switcherFocusPosition = position
+                }
+                holder.close.setOnFocusChangeListener { _, hasFocus ->
+                    if (hasFocus) switcherFocusPosition = position
+                }
+                // 最后一行的卡片按 ↓ 直接落到操作条，别在网格里打转
+                val lastRowStart = ((tabs.size - 1) / 2) * 2
+                if (position >= lastRowStart) {
+                    holder.header.nextFocusDownId = R.id.switcherEdit
+                    holder.close.nextFocusDownId = R.id.switcherEdit
+                }
             }
         }
     }

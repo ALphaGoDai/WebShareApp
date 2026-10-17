@@ -229,6 +229,41 @@
                 android:text="新建标签页"
                 android:textSize="15sp"
                 android:textColor="#202124" />
+
+            <View
+                android:layout_width="0dp"
+                android:layout_height="1dp"
+                android:layout_weight="1" />
+
+            <!-- 电视上给当前选中的卡片一个明确的「编辑 / 关闭」入口；
+                 手机上仍用长按标题和右上角 ✕，这两个按钮只在电视模式显示。 -->
+            <TextView
+                android:id="@+id/switcherEdit"
+                android:layout_width="wrap_content"
+                android:layout_height="match_parent"
+                android:gravity="center"
+                android:paddingStart="18dp"
+                android:paddingEnd="18dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:focusable="true"
+                android:text="编辑"
+                android:textSize="15sp"
+                android:textColor="@color/purple_500"
+                android:visibility="gone" />
+
+            <TextView
+                android:id="@+id/switcherClose"
+                android:layout_width="wrap_content"
+                android:layout_height="match_parent"
+                android:gravity="center"
+                android:paddingStart="18dp"
+                android:paddingEnd="18dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:focusable="true"
+                android:text="关闭"
+                android:textSize="15sp"
+                android:textColor="#D93025"
+                android:visibility="gone" />
         </LinearLayout>
     </FrameLayout>
 
