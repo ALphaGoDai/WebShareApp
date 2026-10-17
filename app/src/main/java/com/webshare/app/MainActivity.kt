@@ -665,11 +665,12 @@ class MainActivity : AppCompatActivity() {
         if (!tvMode) return super.dispatchKeyEvent(event)
         // 网页全屏时把按键全交给全屏视图（视频控件自己会处理方向键/OK）
         if (customView != null) return super.dispatchKeyEvent(event)
-        // 标签页切换器是整屏浮层：按键归浮层。焦点没进去时先塞到「新建标签页」，
-        // 否则下面的网页逻辑会把方向键吃掉（旧版就是这样，遥控器根本走不进卡片）。
+        // 标签页切换器是整屏浮层：按键归浮层。焦点没进去（或落到不画焦点框的网格上）时
+        // 先塞回当前卡片，否则下面的网页逻辑会把方向键吃掉（旧版遥控器根本走不进卡片）。
         if (tabSwitcher.visibility == View.VISIBLE) {
-            if (!tabSwitcher.hasFocus()) {
-                findViewById<View>(R.id.btnNewTab).requestFocus()
+            val focus = tabSwitcher.findFocus()
+            if (focus == null || focus === tabGrid) {
+                focusSwitcherCard(switcherFocusPosition)
                 return true
             }
             return super.dispatchKeyEvent(event)
@@ -2539,34 +2540,49 @@ class MainActivity : AppCompatActivity() {
             webView.clearFocus()
             // 电视上给当前卡片一个明确的「编辑 / 关闭」入口（右上角 ✕ 太小，
             // 焦点也很难从整张卡片钻进那个角落）
+            // 网格本身不抢焦点（RecyclerView 默认可聚焦，一旦拿到焦点就没有任何
+            // 焦点框，遥控器按键像是"失灵"）；焦点只落在卡片和底部操作条上
+            tabGrid.isFocusable = false
             val edit = findViewById<TextView>(R.id.switcherEdit)
             val close = findViewById<TextView>(R.id.switcherClose)
+            val newTab = findViewById<TextView>(R.id.btnNewTab)
             edit.visibility = View.VISIBLE
             close.visibility = View.VISIBLE
             edit.foreground = ContextCompat.getDrawable(this, R.drawable.bg_tv_focus)
             close.foreground = ContextCompat.getDrawable(this, R.drawable.bg_tv_focus)
-            findViewById<View>(R.id.btnNewTab).foreground =
-                ContextCompat.getDrawable(this, R.drawable.bg_tv_focus)
+            newTab.foreground = ContextCompat.getDrawable(this, R.drawable.bg_tv_focus)
+            // 模拟器/触摸过的电视会停在 touch mode，不置这个标志 requestFocus 会被忽略
+            edit.isFocusableInTouchMode = true
+            close.isFocusableInTouchMode = true
+            newTab.isFocusableInTouchMode = true
+            newTab.nextFocusRightId = R.id.switcherEdit
+            edit.nextFocusLeftId = R.id.btnNewTab
             edit.nextFocusRightId = R.id.switcherClose
             close.nextFocusLeftId = R.id.switcherEdit
-            close.nextFocusRightId = R.id.switcherClose
             edit.setOnClickListener {
                 val p = switcherFocusPosition
                 if (p in tabs.indices) editTabAlias(p)
             }
             close.setOnClickListener { closeSwitcherFocusedTab() }
-            // 让遥控器直接落到当前标签页的卡片标题上；网格还没布局好就等一帧再试
+            // 让遥控器直接落到当前标签页的卡片上；网格还没布局好就等一帧再试
             tabGrid.scrollToPosition(currentIndex)
-            tabGrid.postDelayed({
-                val vh = tabGrid.findViewHolderForAdapterPosition(currentIndex) as? TabVH
-                val target: View = vh?.header ?: vh?.itemView
-                    ?: findViewById(R.id.btnNewTab)
-                target.requestFocus()
-            }, 120)
+            focusSwitcherCard(currentIndex, 120)
         } else {
             findViewById<View>(R.id.switcherEdit).visibility = View.GONE
             findViewById<View>(R.id.switcherClose).visibility = View.GONE
         }
+    }
+
+    /** 把遥控器焦点放回切换器里的某张卡片（网格没布局好时退到底部的「新建标签页」） */
+    private fun focusSwitcherCard(position: Int, delay: Long = 0) {
+        val p = position.coerceIn(0, maxOf(tabs.lastIndex, 0))
+        switcherFocusPosition = p
+        val focus = Runnable {
+            val vh = tabGrid.findViewHolderForAdapterPosition(p) as? TabVH
+            val target: View = vh?.itemView ?: findViewById(R.id.btnNewTab)
+            target.requestFocus()
+        }
+        if (delay > 0) tabGrid.postDelayed(focus, delay) else tabGrid.post(focus)
     }
 
     /** 电视切换器「关闭」：关掉当前焦点所在的卡片；关完把焦点挪到下一张 */
@@ -2576,14 +2592,7 @@ class MainActivity : AppCompatActivity() {
         val last = tabs.size == 1
         closeTab(p)
         if (last) return
-        val next = p.coerceAtMost(tabs.lastIndex)
-        switcherFocusPosition = next
-        tabGrid.postDelayed({
-            val vh = tabGrid.findViewHolderForAdapterPosition(next) as? TabVH
-            val target: View = vh?.header ?: vh?.itemView
-                ?: findViewById(R.id.btnNewTab)
-            target.requestFocus()
-        }, 150)
+        focusSwitcherCard(p.coerceAtMost(tabs.lastIndex), 150)
     }
 
     private fun hideTabSwitcher() {
@@ -2762,27 +2771,33 @@ class MainActivity : AppCompatActivity() {
                 true
             }
             if (tvMode) {
-                // 电视：整张卡片和关闭按钮都要能被遥控器选中
+                // 电视：整张卡片作为一个焦点目标（标题条不再单独占一个焦点站，
+                // 免得遥控器在卡片里多按几次）；右上角 ✕ 仍可单独选中
+                holder.header.isFocusable = false
                 holder.itemView.isFocusable = true
+                holder.itemView.isFocusableInTouchMode = true
                 holder.itemView.foreground =
                     ContextCompat.getDrawable(this@MainActivity, R.drawable.bg_tv_focus)
                 holder.close.isFocusable = true
+                holder.close.isFocusableInTouchMode = true
                 holder.close.foreground =
                     ContextCompat.getDrawable(this@MainActivity, R.drawable.bg_tv_focus)
                 // 记住焦点在哪张卡片上：切换器底部的「编辑 / 关闭」作用于它
                 holder.itemView.setOnFocusChangeListener { _, hasFocus ->
                     if (hasFocus) switcherFocusPosition = position
                 }
-                holder.header.setOnFocusChangeListener { _, hasFocus ->
-                    if (hasFocus) switcherFocusPosition = position
-                }
                 holder.close.setOnFocusChangeListener { _, hasFocus ->
                     if (hasFocus) switcherFocusPosition = position
+                }
+                // 电视上点卡片右上角的 ✕ 也走「关完把焦点交给下一张」，不会关完就没焦点
+                holder.close.setOnClickListener {
+                    switcherFocusPosition = position
+                    closeSwitcherFocusedTab()
                 }
                 // 最后一行的卡片按 ↓ 直接落到操作条，别在网格里打转
                 val lastRowStart = ((tabs.size - 1) / 2) * 2
                 if (position >= lastRowStart) {
-                    holder.header.nextFocusDownId = R.id.switcherEdit
+                    holder.itemView.nextFocusDownId = R.id.switcherEdit
                     holder.close.nextFocusDownId = R.id.switcherEdit
                 }
             }
