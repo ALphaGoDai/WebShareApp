@@ -765,8 +765,9 @@ WebView 时只画 `bg_tv_page_focus` 紫框（`foreground`），不调 `__wsTvSh
 
 **顺带修的历史问题**：部分 WebView（系统 WebView 132 上复现）`canGoBack()` 明明历史里有上一页却返回
 false，`goBackOrForward(-1)` 也不动；返回键改成先让页面执行 `history.back()`（Blink 的历史是准的），
-450ms 后地址没变再退回原生 `goBackOrForward(-1)`。没有上一页但还有别的标签页时，返回 = 关掉当前
-标签页。
+450ms 后地址没变再退回原生 `goBackOrForward(-1)`。没有上一页时返回键只退出应用、**不关标签页**
+（v1.0.57 起；之前会顺手关掉当前标签页，用户刚新建的页按一下返回就没了）；关标签只能由用户在
+切换器里点 ✕。
 
 ### 最低系统要求
 

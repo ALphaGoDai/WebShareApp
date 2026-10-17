@@ -1988,16 +1988,14 @@ class MainActivity : AppCompatActivity() {
                             webView.goBackOrForward(-1)
                         }
                     }, 450)
-                } else if (tabs.size > 1) {
-                    // 这一页没有上一页，但还开着别的标签页：返回 = 关掉当前标签页（播放页看完返回上一页）
-                    Log.i(TAG, "back: 关闭当前标签页（还有 ${tabs.size} 个）")
-                    closeTab(currentIndex)
                 } else {
+                    // 这一页没有上一页：退出应用，但绝不顺手关标签页——
+                    // 用户要的是「返回键退出、页面还在」，关标签只能由他自己按 ✕。
                     // 退出直接 finish()：不要用 isEnabled=false + onBackPressed() 那套——
                     // 任务只是退到后台时 Activity 还活着，回调却一直停用，下次回来返回键会直接退出。
                     Log.i(
                         TAG,
-                        "back: 没有上一页，退出（bfSize=${bf.size}, index=${bf.currentIndex}, url=${webView.url}）"
+                        "back: 没有上一页，退出且保留 ${tabs.size} 个标签页（bfSize=${bf.size}, index=${bf.currentIndex}, url=${webView.url}）"
                     )
                     finish()
                 }
