@@ -1,6 +1,8 @@
 package com.webshare.app
 
+import android.content.ComponentName
 import android.content.Intent
+import android.graphics.Typeface
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
@@ -18,6 +20,7 @@ import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import java.text.SimpleDateFormat
@@ -25,9 +28,8 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * 已下载：浏览器风格的下载记录页。
- * 进行中的显示实时进度（800ms 轮询历史存储），完成的点一下打开，
- * 失败的可以重试；每条都能删除（连文件一起删或只删记录）。
+ * 已下载：一个页面两个标签——「下载记录」（网页里存到手机的文件）和「缓存视频」
+ * （长按底栏「已下载」缓存在浏览器里的视频，可离线播放 / 保存到手机 / 分享 / 删除）。
  */
 class DownloadsActivity : AppCompatActivity() {
 
@@ -35,6 +37,23 @@ class DownloadsActivity : AppCompatActivity() {
     private lateinit var adapter: Adapter
     private lateinit var emptyView: View
     private lateinit var clearButton: TextView
+
+    // ---------- 两个标签 ----------
+    private lateinit var tabRow: View
+    private lateinit var tabDownloads: View
+    private lateinit var tabCache: View
+    private lateinit var tabDownloadsText: TextView
+    private lateinit var tabCacheText: TextView
+    private lateinit var tabDownloadsLine: View
+    private lateinit var tabCacheLine: View
+    private lateinit var cacheList: RecyclerView
+    private lateinit var cacheAdapter: CacheAdapter
+    private lateinit var cacheEmptyView: View
+
+    private var activeTab = TAB_DOWNLOADS
+    private var cacheItems: List<VideoCacheStore.Entry> = emptyList()
+    private var cacheSignature = ""
+    private val cacheDayFmt = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault())
 
     /** 电视上所有可点的地方都要能用遥控器选中 */
     private var tvMode = false
@@ -65,8 +84,18 @@ class DownloadsActivity : AppCompatActivity() {
     private val pollRunner = object : Runnable {
         override fun run() {
             reload()
+            reloadCache()   // 缓存完成时列表/标签上的数量不用退出这一页也能更新
             poll.postDelayed(this, 800)
         }
+    }
+
+    companion object {
+        private const val TAB_DOWNLOADS = 0
+        private const val TAB_CACHE = 1
+
+        /** 外部（缓存完成通知）打开这一页时指定先看哪个标签 */
+        const val EXTRA_TAB = "tab"
+        const val TAB_CACHE_VALUE = "cache"
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -76,8 +105,21 @@ class DownloadsActivity : AppCompatActivity() {
 
         findViewById<ImageButton>(R.id.btnBack).setOnClickListener { finish() }
         clearButton = findViewById(R.id.btnClear)
-        clearButton.setOnClickListener { askClearAll() }
+        clearButton.setOnClickListener {
+            if (activeTab == TAB_CACHE) askClearCache() else askClearAll()
+        }
         emptyView = findViewById(R.id.emptyView)
+        cacheEmptyView = findViewById(R.id.cacheEmptyView)
+
+        tabRow = findViewById(R.id.tabRow)
+        tabDownloads = findViewById(R.id.tabDownloads)
+        tabCache = findViewById(R.id.tabCache)
+        tabDownloadsText = findViewById(R.id.tabDownloadsText)
+        tabCacheText = findViewById(R.id.tabCacheText)
+        tabDownloadsLine = findViewById(R.id.tabDownloadsLine)
+        tabCacheLine = findViewById(R.id.tabCacheLine)
+        tabDownloads.setOnClickListener { selectTab(TAB_DOWNLOADS) }
+        tabCache.setOnClickListener { selectTab(TAB_CACHE) }
 
         selectionBar = findViewById(R.id.selectionBar)
         batchBar = findViewById(R.id.batchBar)
@@ -96,10 +138,60 @@ class DownloadsActivity : AppCompatActivity() {
         val list = findViewById<RecyclerView>(R.id.list)
         list.layoutManager = LinearLayoutManager(this)
         list.adapter = adapter
+
+        cacheAdapter = CacheAdapter()
+        cacheList = findViewById(R.id.cacheList)
+        cacheList.layoutManager = LinearLayoutManager(this)
+        cacheList.adapter = cacheAdapter
+
         setupTvFocus()
+        selectTab(if (intent?.getStringExtra(EXTRA_TAB) == TAB_CACHE_VALUE) TAB_CACHE else TAB_DOWNLOADS)
     }
 
-    /** 电视：顶栏和批量操作栏的按钮都要能用遥控器选中，并画出焦点框 */
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent?.getStringExtra(EXTRA_TAB) == TAB_CACHE_VALUE) selectTab(TAB_CACHE)
+    }
+
+    /** 切标签：两个列表叠在同一块区域，按标签显示其中一个（批量选择只属于下载记录） */
+    private fun selectTab(tab: Int) {
+        if (tab == TAB_CACHE && selectionMode) exitSelection()
+        activeTab = tab
+        val downloads = tab == TAB_DOWNLOADS
+
+        val selectedColor = ContextCompat.getColor(this, R.color.purple_500)
+        val idleColor = 0xFF5F6368.toInt()
+        tabDownloadsText.setTextColor(if (downloads) selectedColor else idleColor)
+        tabDownloadsText.setTypeface(null, if (downloads) Typeface.BOLD else Typeface.NORMAL)
+        tabDownloadsLine.visibility = if (downloads) View.VISIBLE else View.INVISIBLE
+        tabCacheText.setTextColor(if (downloads) idleColor else selectedColor)
+        tabCacheText.setTypeface(null, if (downloads) Typeface.NORMAL else Typeface.BOLD)
+        tabCacheLine.visibility = if (downloads) View.INVISIBLE else View.VISIBLE
+
+        findViewById<View>(R.id.list).visibility = if (downloads) View.VISIBLE else View.GONE
+        cacheList.visibility = if (downloads) View.GONE else View.VISIBLE
+        emptyView.visibility =
+            if (downloads && currentItems.isEmpty()) View.VISIBLE else View.GONE
+        cacheEmptyView.visibility =
+            if (!downloads && cacheItems.isEmpty()) View.VISIBLE else View.GONE
+
+        if (downloads) updateSelectionUi() else updateHeaderUi()
+        if (!downloads) {
+            reloadCache()
+            if (tvMode) {
+                // 遥控器切到缓存标签就有落点：第一条（没有条目就落到返回）。
+                // 等一拍再找：刚切过来时列表可能还没量好，拿不到第一条就先把焦点留在返回上。
+                cacheList.postDelayed({
+                    val holder = cacheList.findViewHolderForAdapterPosition(0)
+                    val target: View = holder?.itemView ?: findViewById(R.id.btnBack)
+                    if (!target.hasFocus()) target.requestFocus()
+                }, 120)
+            }
+        }
+    }
+
+    /** 电视：顶栏、标签和批量操作栏的按钮都要能用遥控器选中，并画出焦点框 */
     private fun setupTvFocus() {
         tvMode = TvMode.isTv(this)
         if (!tvMode) return
@@ -109,11 +201,17 @@ class DownloadsActivity : AppCompatActivity() {
         clearButton.foreground = ContextCompat.getDrawable(this, R.drawable.bg_tv_focus)
         selectAllButton.isFocusable = true
         selectAllButton.foreground = ContextCompat.getDrawable(this, R.drawable.bg_tv_focus)
+        for (id in intArrayOf(R.id.tabDownloads, R.id.tabCache)) {
+            val v = findViewById<View>(id)
+            v.isFocusable = true
+            v.foreground = ContextCompat.getDrawable(this, R.drawable.bg_tv_focus)
+        }
     }
 
     override fun onResume() {
         super.onResume()
         reload()
+        reloadCache()
         poll.postDelayed(pollRunner, 800)
     }
 
@@ -141,7 +239,8 @@ class DownloadsActivity : AppCompatActivity() {
         val ids = items.map { it.id }.toSet()
         selected.retainAll(ids)
         if (selected.isEmpty() && selectionMode) selectionMode = false
-        emptyView.visibility = if (items.isEmpty()) View.VISIBLE else View.GONE
+        emptyView.visibility =
+            if (activeTab == TAB_DOWNLOADS && items.isEmpty()) View.VISIBLE else View.GONE
         updateSelectionUi()
         val signature = items.joinToString("|") {
             "${it.id}:${it.status}:${it.received}:${it.total}:${it.size}:${it.savedName}"
@@ -277,11 +376,13 @@ class DownloadsActivity : AppCompatActivity() {
 
     /** 选择模式的界面状态：顶栏（已选几项/全选）、底栏按钮可用性、清空按钮的显示 */
     private fun updateSelectionUi() {
-        selectionBar.visibility = if (selectionMode) View.VISIBLE else View.GONE
-        batchBar.visibility = if (selectionMode) View.VISIBLE else View.GONE
-        clearButton.visibility =
-            if (selectionMode || currentItems.isEmpty()) View.GONE else View.VISIBLE
-        if (selectionMode) {
+        val showSelection = selectionMode && activeTab == TAB_DOWNLOADS
+        selectionBar.visibility = if (showSelection) View.VISIBLE else View.GONE
+        batchBar.visibility = if (showSelection) View.VISIBLE else View.GONE
+        // 选择模式下把标签行收起来，专心勾选
+        tabRow.visibility = if (showSelection) View.GONE else View.VISIBLE
+        updateHeaderUi()
+        if (showSelection) {
             val picked = currentItems.filter { selected.contains(it.id) }
             selCount.text = "已选 ${picked.size} 项"
             val allPicked = currentItems.isNotEmpty() && picked.size == currentItems.size
@@ -296,6 +397,17 @@ class DownloadsActivity : AppCompatActivity() {
         if (sig != selectionSignature) {
             selectionSignature = sig
             adapter.notifyDataSetChanged()
+        }
+    }
+
+    /** 顶栏「清空」跟着当前标签走：下载记录清记录，缓存视频清缓存 */
+    private fun updateHeaderUi() {
+        clearButton.text = if (activeTab == TAB_CACHE) "清空缓存" else "清空"
+        clearButton.visibility = when {
+            selectionMode && activeTab == TAB_DOWNLOADS -> View.GONE
+            activeTab == TAB_CACHE -> if (cacheItems.isEmpty()) View.GONE else View.VISIBLE
+            currentItems.isEmpty() -> View.GONE
+            else -> View.VISIBLE
         }
     }
 
@@ -391,6 +503,185 @@ class DownloadsActivity : AppCompatActivity() {
             return
         }
         super.onBackPressed()
+    }
+
+    // ---------- 缓存视频（长按底栏「已下载」缓存的视频） ----------
+
+    private fun reloadCache() {
+        VideoCacheStore.prune(this)   // 文件被外面删掉的条目顺手清掉
+        val items = VideoCacheStore.list(this)
+        val sig = items.joinToString("|") { "${it.id}:${it.size}:${it.title}" }
+        if (sig != cacheSignature) {
+            cacheSignature = sig
+            cacheItems = items
+            cacheAdapter.notifyDataSetChanged()
+            tabCacheText.text =
+                if (cacheItems.isEmpty()) "缓存视频" else "缓存视频 ${cacheItems.size}"
+        }
+        cacheEmptyView.visibility =
+            if (activeTab == TAB_CACHE && cacheItems.isEmpty()) View.VISIBLE else View.GONE
+        updateHeaderUi()
+    }
+
+    private fun playCache(entry: VideoCacheStore.Entry) {
+        val url = LocalMediaServer.playerUrl(this, entry)
+        if (url == null) {
+            Toast.makeText(this, "本机播放服务起不来，先重启一下 App", Toast.LENGTH_LONG).show()
+            return
+        }
+        // 就在浏览器里打开离线播放页（同一个 App，返回键还能回到这一页）
+        val intent = Intent(this, MainActivity::class.java).apply {
+            action = Intent.ACTION_VIEW          // 少了它 handleIntent 不会走 webshare:// 那一支
+            data = Uri.parse("webshare://play/${entry.id}")
+            addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        }
+        try {
+            startActivity(intent)
+        } catch (e: Exception) {
+            Toast.makeText(this, "打不开播放页：${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    /** 存到手机：借用「下载记录」那套（走我们的 DNS 通道 + 用户选的保存位置），源就是本机缓存 */
+    private fun saveCacheToPhone(entry: VideoCacheStore.Entry) {
+        val url = LocalMediaServer.fileUrl(this, entry)
+        if (url == null) {
+            Toast.makeText(this, "本机播放服务起不来，先重启一下 App", Toast.LENGTH_LONG).show()
+            return
+        }
+        val file = VideoCacheStore.fileFor(this, entry)
+        val tree = SaveLocationStore(this).locations().firstOrNull()?.treeUri?.toString()
+        // 存出去用干净的名字（缓存文件带 id 前缀，是为了在缓存目录里不重名）；重名系统会自动改名
+        val pretty = (entry.title.ifBlank { "视频" }) + "." + file.extension
+        DownloadService.start(
+            context = this,
+            url = url,
+            name = pretty,
+            mime = cacheMimeOf(file.name),
+            treeUri = tree,
+            referer = null
+        )
+        Toast.makeText(this, "已开始保存到手机（进度看通知栏，完成在「下载记录」里）", Toast.LENGTH_LONG).show()
+    }
+
+    private fun shareCache(entry: VideoCacheStore.Entry) {
+        val file = VideoCacheStore.fileFor(this, entry)
+        if (!file.exists()) {
+            Toast.makeText(this, "文件不在了", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val uri = try {
+            FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+        } catch (e: Exception) {
+            Toast.makeText(this, "分享失败：${e.message}", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = cacheMimeOf(file.name)
+            putExtra(Intent.EXTRA_STREAM, uri)
+            putExtra(Intent.EXTRA_SUBJECT, entry.title)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            // 别把自己列进分享目标：本浏览器自己也认 video 打头的分享（那是"别的 App 发给浏览器"
+            // 的入口），不排掉的话——手机上只有一个能收的应用时——点分享会把自己又打开一遍
+            putExtra(
+                Intent.EXTRA_EXCLUDE_COMPONENTS,
+                arrayOf(ComponentName(this@DownloadsActivity, MainActivity::class.java))
+            )
+        }
+        // 只有自己认识这种分享时，系统那个"只有一个目标就直接打开"的行为会把我们绕回自己身上：
+        // 先问清楚有没有别人能收，没有就直说（微信/QQ/相册都算）
+        val others = packageManager.queryIntentActivities(intent, 0)
+            .filter { it.activityInfo.packageName != packageName }
+        if (others.isEmpty()) {
+            Toast.makeText(this, "手机上还没有能接收视频的应用（微信、QQ 之类）", Toast.LENGTH_LONG).show()
+            return
+        }
+        try {
+            startActivity(Intent.createChooser(intent, "分享「${entry.title}」"))
+        } catch (e: Exception) {
+            Toast.makeText(this, "没有应用能接收这个视频", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun askDeleteCache(entry: VideoCacheStore.Entry) {
+        AlertDialog.Builder(this)
+            .setTitle("删掉「${entry.title}」？")
+            .setMessage("缓存文件会一起删掉（${DownloadService.fmtSize(entry.size)}），删了要重新缓存。")
+            .setPositiveButton("删除") { _, _ ->
+                VideoCacheStore.remove(this, entry.id)
+                Toast.makeText(this, "已删除", Toast.LENGTH_SHORT).show()
+                reloadCache()
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun askClearCache() {
+        val total = cacheItems.sumOf { if (it.size > 0) it.size else 0L }
+        AlertDialog.Builder(this)
+            .setTitle("清空全部缓存视频？")
+            .setMessage("${cacheItems.size} 个视频、共 ${DownloadService.fmtSize(total)} 都会删掉。")
+            .setPositiveButton("全部清空") { _, _ ->
+                VideoCacheStore.clear(this)
+                Toast.makeText(this, "已清空", Toast.LENGTH_SHORT).show()
+                reloadCache()
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun cacheMimeOf(name: String): String =
+        when (name.substringAfterLast('.', "").lowercase(Locale.US)) {
+            "mp4", "m4v" -> "video/mp4"
+            "webm" -> "video/webm"
+            "mkv" -> "video/x-matroska"
+            "ts" -> "video/mp2t"
+            "mov" -> "video/quicktime"
+            "3gp" -> "video/3gpp"
+            else -> "video/*"
+        }
+
+    private inner class CacheAdapter : RecyclerView.Adapter<CacheAdapter.VH>() {
+
+        inner class VH(v: View) : RecyclerView.ViewHolder(v) {
+            val title: TextView = v.findViewById(R.id.title)
+            val subtitle: TextView = v.findViewById(R.id.subtitle)
+            val source: TextView = v.findViewById(R.id.source)
+        }
+
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH =
+            VH(LayoutInflater.from(parent.context).inflate(R.layout.item_videocache, parent, false))
+
+        override fun getItemCount(): Int = cacheItems.size
+
+        override fun onBindViewHolder(holder: VH, position: Int) {
+            val entry = cacheItems[position]
+            val kindLabel = if (entry.kind == MediaWatch.KIND_HLS) "网页分片合成" else "视频文件"
+            holder.title.text = entry.title
+            holder.subtitle.text =
+                "$kindLabel · ${DownloadService.fmtSize(entry.size)} · ${cacheDayFmt.format(Date(entry.createdAt))}"
+            holder.source.text = entry.pageUrl.ifBlank { entry.url }
+
+            holder.itemView.setOnClickListener { playCache(entry) }
+            holder.itemView.findViewById<View>(R.id.btnPlay).setOnClickListener { playCache(entry) }
+            holder.itemView.findViewById<View>(R.id.btnSave).setOnClickListener { saveCacheToPhone(entry) }
+            holder.itemView.findViewById<View>(R.id.btnShare).setOnClickListener { shareCache(entry) }
+            holder.itemView.findViewById<View>(R.id.btnDelete).setOnClickListener { askDeleteCache(entry) }
+
+            if (tvMode) {
+                val ring = ContextCompat.getDrawable(this@DownloadsActivity, R.drawable.bg_tv_focus)
+                holder.itemView.isFocusable = true
+                holder.itemView.foreground = ring
+                holder.itemView.findViewById<TextView>(R.id.btnSave).text = "保存到本地"
+                for (id in intArrayOf(R.id.btnPlay, R.id.btnSave, R.id.btnShare, R.id.btnDelete)) {
+                    val b = holder.itemView.findViewById<TextView>(id)
+                    b.isFocusable = true
+                    b.foreground = ContextCompat.getDrawable(
+                        this@DownloadsActivity, R.drawable.bg_tv_focus
+                    )
+                }
+            }
+        }
     }
 
     // ---------- 列表 ----------

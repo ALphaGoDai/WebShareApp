@@ -31,7 +31,7 @@
                 android:visibility="gone" />
         </FrameLayout>
 
-        <!-- 底部导航栏：设置 / 已下载 / 缓存视频 / 标签页（带数量角标） / 刷新（长按=清缓存强刷） -->
+        <!-- 底部导航栏：设置 / 已下载（长按=缓存这一页的视频） / 标签页（带数量角标） / 刷新（长按=清缓存强刷） -->
         <LinearLayout
             android:id="@+id/bottomBar"
             android:layout_width="match_parent"
@@ -86,31 +86,6 @@
                     android:layout_height="wrap_content"
                     android:layout_marginTop="2dp"
                     android:text="已下载"
-                    android:textSize="10sp"
-                    android:textColor="#5F6368" />
-            </LinearLayout>
-
-            <LinearLayout
-                android:id="@+id/navCache"
-                android:layout_width="0dp"
-                android:layout_height="match_parent"
-                android:layout_weight="1"
-                android:orientation="vertical"
-                android:gravity="center"
-                android:background="?attr/selectableItemBackgroundBorderless">
-
-                <ImageView
-                    android:layout_width="24dp"
-                    android:layout_height="24dp"
-                    android:src="@drawable/ic_nav_cache"
-                    android:tint="@color/purple_500"
-                    android:contentDescription="@string/videocache_title" />
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="2dp"
-                    android:text="缓存"
                     android:textSize="10sp"
                     android:textColor="#5F6368" />
             </LinearLayout>
@@ -173,8 +148,7 @@
         </LinearLayout>
     </LinearLayout>
 
-    <!-- 底栏上方的两条浮动提示叠在一起：先「发现视频」，再「此网站请求打开 App」。
-         两条都藏起来时这个容器是零高度的，不挡页面。 -->
+    <!-- 底栏上方的浮动提示（网页要打开别的 App 时出现）。藏起来时这个容器是零高度的，不挡页面。 -->
     <LinearLayout
         android:id="@+id/popupStack"
         android:layout_width="match_parent"
@@ -184,80 +158,6 @@
         android:layout_marginEnd="12dp"
         android:layout_marginBottom="64dp"
         android:orientation="vertical">
-
-        <!-- 发现可缓存的视频：点「缓存」挑一个存进浏览器，之后不联网也能看 -->
-        <LinearLayout
-            android:id="@+id/mediaBar"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:gravity="center_vertical"
-            android:background="@drawable/bg_open_app_bar"
-            android:elevation="12dp"
-            android:paddingStart="14dp"
-            android:paddingEnd="4dp"
-            android:paddingTop="10dp"
-            android:paddingBottom="10dp"
-            android:visibility="gone">
-
-            <ImageView
-                android:id="@+id/mediaIcon"
-                android:layout_width="36dp"
-                android:layout_height="36dp"
-                android:src="@drawable/ic_video_found"
-                android:tint="@color/purple_500"
-                android:background="?attr/selectableItemBackgroundBorderless"
-                android:contentDescription="缓存视频" />
-
-            <LinearLayout
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:layout_marginStart="12dp"
-                android:orientation="vertical">
-
-                <TextView
-                    android:id="@+id/mediaTitle"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="发现视频"
-                    android:textSize="15sp"
-                    android:textColor="#202124" />
-
-                <TextView
-                    android:id="@+id/mediaSub"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="1dp"
-                    android:text="缓存到浏览器，不联网也能看"
-                    android:textSize="13sp"
-                    android:textColor="#5F6368" />
-            </LinearLayout>
-
-            <TextView
-                android:id="@+id/mediaGo"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:paddingStart="14dp"
-                android:paddingEnd="14dp"
-                android:paddingTop="10dp"
-                android:paddingBottom="10dp"
-                android:background="?attr/selectableItemBackgroundBorderless"
-                android:text="缓存"
-                android:textSize="15sp"
-                android:textStyle="bold"
-                android:textColor="@color/purple_500" />
-
-            <ImageView
-                android:id="@+id/mediaClose"
-                android:layout_width="40dp"
-                android:layout_height="40dp"
-                android:padding="8dp"
-                android:src="@drawable/ic_nav_close"
-                android:tint="#5F6368"
-                android:background="?attr/selectableItemBackgroundBorderless"
-                android:contentDescription="不再提示" />
-        </LinearLayout>
 
         <!-- 网页请求打开别的 App（douban:// 豆瓣 之类）：浮在底栏上方的一条提示，
              和 Chrome 的「此网站请求打开 App」一样，点「打开」才真的跳走 -->

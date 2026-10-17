@@ -151,11 +151,7 @@
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
-        <!-- 缓存视频：缓存下来的视频列表（离线看 / 保存到手机 / 分享 / 删） -->
-        <activity
-            android:name=".VideoCacheActivity"
-            android:exported="false"
-            android:label="@string/videocache_title" />
+        <!-- 缓存视频的列表合并在「已下载」页里（第二个标签），不再单独一个页面 -->
 
         <!-- 缓存视频：把视频分片抓下来合成一个文件，进度发通知栏 -->
         <service

@@ -178,7 +178,8 @@ class VideoCacheService : Service() {
     private fun notifyDone(entry: VideoCacheStore.Entry) {
         val open = PendingIntent.getActivity(
             this, (entry.id % 100000).toInt(),
-            Intent(this, VideoCacheActivity::class.java)
+            Intent(this, DownloadsActivity::class.java)
+                .putExtra(DownloadsActivity.EXTRA_TAB, DownloadsActivity.TAB_CACHE_VALUE)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )

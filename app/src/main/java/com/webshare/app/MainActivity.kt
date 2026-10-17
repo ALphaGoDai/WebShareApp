@@ -58,14 +58,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var openAppIcon: ImageView
     private lateinit var openAppName: TextView
 
-    /** 底栏上方「发现视频 · 缓存到浏览器」提示条（这一页出现了视频源时浮出来） */
-    private lateinit var mediaBar: View
-    private lateinit var mediaTitle: TextView
-    private lateinit var mediaSub: TextView
-
-    /** 用户点过 ✕：这一页不再浮动条（换页/换标签页会重新判） */
-    private var mediaDismissed = false
-
     // ---------- 电视 / 遥控器 ----------
 
     /** 电视（Leanback 桌面、无触摸屏）：开虚拟光标，方向键交给页面，工具栏靠长按 OK 过去 */
@@ -278,7 +270,6 @@ class MainActivity : AppCompatActivity() {
         initTabs()
         setupBottomBar()
         setupOpenAppBar()
-        setupMediaBar()
         setupBackNavigation()
         if (tvMode) setupTvMode()
 
@@ -315,8 +306,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
-        // MediaWatch 是个单例，回调里握着这个 Activity：不摘掉就是内存泄漏
-        MediaWatch.onChange = null
         centerLongPress?.let { tabs.getOrNull(currentIndex)?.webView?.removeCallbacks(it) }
         centerLongPress = null
         super.onDestroy()
@@ -344,7 +333,7 @@ class MainActivity : AppCompatActivity() {
         bar.layoutParams = bar.layoutParams.apply { height = dp(64) }
 
         val navIds = intArrayOf(
-            R.id.navSettings, R.id.navDownloads, R.id.navCache, R.id.navTabs, R.id.navRefresh
+            R.id.navSettings, R.id.navDownloads, R.id.navTabs, R.id.navRefresh
         )
         for (id in navIds) {
             val item = findViewById<View>(id)
@@ -368,8 +357,8 @@ class MainActivity : AppCompatActivity() {
         val stack = findViewById<View>(R.id.popupStack)
         (stack.layoutParams as? ViewGroup.MarginLayoutParams)?.bottomMargin = dp(76)
 
-        // 浮条上的按钮也参与焦点：长按 OK / 菜单键切到工具栏后，能按到「缓存」
-        for (id in intArrayOf(R.id.mediaGo, R.id.mediaClose, R.id.openAppGo, R.id.openAppClose)) {
+        // 浮条上的按钮也参与焦点：长按 OK / 菜单键切到工具栏后能按到
+        for (id in intArrayOf(R.id.openAppGo, R.id.openAppClose)) {
             val v = findViewById<View>(id)
             v.isFocusable = true
             v.foreground = ContextCompat.getDrawable(this, R.drawable.bg_tv_focus)
@@ -391,23 +380,21 @@ class MainActivity : AppCompatActivity() {
         val wvId = wv.id
         if (wvId == View.NO_ID) return
         for (id in intArrayOf(
-            R.id.navSettings, R.id.navDownloads, R.id.navCache, R.id.navTabs, R.id.navRefresh,
-            R.id.mediaGo, R.id.openAppGo
+            R.id.navSettings, R.id.navDownloads, R.id.navTabs, R.id.navRefresh,
+            R.id.openAppGo
         )) {
             findViewById<View>(id).nextFocusUpId = wvId
         }
         wv.nextFocusDownId = R.id.navRefresh
-        findViewById<View>(R.id.mediaGo).nextFocusDownId = R.id.navRefresh
         findViewById<View>(R.id.openAppGo).nextFocusDownId = R.id.navRefresh
     }
 
-    /** 长按 OK / 菜单键：光标让位，焦点交给工具栏（有「发现视频」就先到它上面） */
+    /** 长按 OK / 菜单键：光标让位，焦点交给工具栏 */
     private fun focusNativeControls() {
         val wv = tabs.getOrNull(currentIndex)?.webView ?: return
         blurPageEditing(wv)
         wv.evaluateJavascript("window.__wsTvShow&&window.__wsTvShow(false)", null)
         val target = when {
-            mediaBar.visibility == View.VISIBLE -> findViewById<View>(R.id.mediaGo)
             openAppBar.visibility == View.VISIBLE -> findViewById<View>(R.id.openAppGo)
             else -> findViewById<View>(R.id.navRefresh)
         }
@@ -444,7 +431,7 @@ class MainActivity : AppCompatActivity() {
         Toast.makeText(
             this,
             "电视遥控：方向键移动光标 · OK 点击 · 长按 OK / 菜单键切到工具栏\n" +
-                "播放页：←/→ 快退快进 10 秒 · OK 暂停",
+                "缓存视频：工具栏里长按「已下载」· 播放页：←/→ 快退快进 10 秒 · OK 暂停",
             Toast.LENGTH_LONG
         ).show()
     }
@@ -1198,7 +1185,6 @@ class MainActivity : AppCompatActivity() {
                         FrameLayout.LayoutParams.MATCH_PARENT
                     )
                 )
-                mediaBar.visibility = View.GONE
                 hideOpenAppBar()
                 // 全屏时把系统栏也藏起来（电视上没有，手机上有效）
                 @Suppress("DEPRECATION")
@@ -1438,11 +1424,9 @@ class MainActivity : AppCompatActivity() {
                 pageEditing.set(false)
                 // 页面换了一页，上一条"打开 App"的提示就过期
                 hideOpenAppBar()
-                // 换页了：上一页发现的视频不再算这一页的，浮动条也收起来（新页面发现视频会再浮出来）
+                // 换页了：上一页发现的视频不再算这一页的（长按「已下载」只认当前页）
                 MediaWatch.clearView(view)
                 MediaWatch.setPageUrl(view, url)   // 记地址（拦截线程不能碰 WebView，只能在这儿记）
-                mediaDismissed = false
-                if (view === tabs.getOrNull(currentIndex)?.webView) refreshMediaBar()
                 // 「到点自动打开」还在等位置时，页面要是自己跳去了别的站点（用户点了别的链接），
                 // 说明人已经在看别的东西了——记一笔，等会儿判定命中也不抢这一页。
                 // 恢复的标签页冷启动那次自己的加载不算（地址本来就在加载的那个）。
@@ -1499,47 +1483,21 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ---------- 缓存视频（发现这一页的视频，存进浏览器离线看） ----------
+    // ---------- 缓存视频（长按底栏「已下载」：把这一页的视频存进浏览器，之后离线看） ----------
 
-    private fun setupMediaBar() {
-        mediaBar = findViewById(R.id.mediaBar)
-        mediaTitle = findViewById(R.id.mediaTitle)
-        mediaSub = findViewById(R.id.mediaSub)
-        findViewById<View>(R.id.mediaGo).setOnClickListener { showVideoCandidates() }
-        findViewById<View>(R.id.mediaIcon).setOnClickListener { showVideoCandidates() }
-        findViewById<View>(R.id.mediaClose).setOnClickListener {
-            mediaDismissed = true
-            mediaBar.visibility = View.GONE
-        }
-        // 发现新视频（在 WebViewClient 的线程上）→ 回主线程刷新提示条
-        MediaWatch.onChange = { runOnUiThread { refreshMediaBar() } }
-        refreshMediaBar()
-    }
-
-    /** 当前这一页有没有可缓存的视频？有就浮出提示条 */
-    private fun refreshMediaBar() {
-        if (!this::mediaBar.isInitialized) return
+    /**
+     * 底栏「已下载」长按：从当前这一页发现的视频源里挑一个开始缓存。
+     * 一个候选直接开始，多个列出来让用户选，没有就提示先去播一下。
+     */
+    private fun startCacheFromPage() {
         val tab = tabs.getOrNull(currentIndex)
-        val found = if (tab == null) emptyList() else MediaWatch.forView(tab.webView)
-        if (found.isEmpty() || mediaDismissed) {
-            mediaBar.visibility = View.GONE
-            return
-        }
-        val first = found.first()
-        mediaTitle.text = if (found.size > 1) "发现 ${found.size} 个视频" else "发现视频"
-        mediaSub.text = "${first.baseName} · ${DownloadService.fmtSize(first.size)}".let {
-            if (first.size > 0) it else "${first.baseName} · ${first.kindLabel}"
-        }
-        mediaBar.visibility = View.VISIBLE
-    }
-
-    /** 挑一个缓存（多个候选时列出来让用户选） */
-    private fun showVideoCandidates() {
-        val tab = tabs.getOrNull(currentIndex) ?: return
-        val list = MediaWatch.forView(tab.webView)
+        val list = if (tab == null) emptyList() else MediaWatch.forView(tab.webView)
         if (list.isEmpty()) {
-            mediaBar.visibility = View.GONE
-            Toast.makeText(this, "这一页没看到能缓存的视频", Toast.LENGTH_SHORT).show()
+            Toast.makeText(
+                this,
+                "这一页还没发现视频：先在网页里点播放，再长按「已下载」",
+                Toast.LENGTH_LONG
+            ).show()
             return
         }
         if (list.size == 1) {
@@ -1560,9 +1518,11 @@ class MainActivity : AppCompatActivity() {
     private fun startCache(item: MediaWatch.Item) {
         val tab = tabs.getOrNull(currentIndex)
         val title = pickVideoTitle(item, tab)
-        mediaDismissed = true
-        mediaBar.visibility = View.GONE
-        Toast.makeText(this, "开始缓存：$title\n进度在通知栏，缓存完在「缓存」里离线看", Toast.LENGTH_LONG).show()
+        Toast.makeText(
+            this,
+            "开始缓存：$title\n进度在通知栏，缓存完在「已下载 → 缓存视频」里离线看",
+            Toast.LENGTH_LONG
+        ).show()
         Log.i(TAG, "开始缓存视频：$title ${item.kind} ${item.url}")
         VideoCacheService.start(this, item, title)
     }
@@ -1705,10 +1665,11 @@ class MainActivity : AppCompatActivity() {
             markOwnUi()
             startActivity(Intent(this, DownloadsActivity::class.java))
         }
-
-        findViewById<View>(R.id.navCache).setOnClickListener {
+        // 长按「已下载」= 缓存这一页在放的视频（不再每页弹浮条）
+        findViewById<View>(R.id.navDownloads).setOnLongClickListener {
             markOwnUi()
-            startActivity(Intent(this, VideoCacheActivity::class.java))
+            startCacheFromPage()
+            true
         }
 
         findViewById<View>(R.id.navTabs).setOnClickListener {
@@ -1926,7 +1887,6 @@ class MainActivity : AppCompatActivity() {
     private fun switchTo(index: Int) {
         if (index !in tabs.indices) return
         hideOpenAppBar()   // 换标签页了，上一条"打开 App"的提示过期
-        mediaDismissed = false
         if (currentIndex in tabs.indices && currentIndex != index) {
             captureThumb(tabs[currentIndex])
         }
@@ -1949,7 +1909,6 @@ class MainActivity : AppCompatActivity() {
         updateTabBadge()
         hideTabSwitcher()
         persistTabs()
-        refreshMediaBar()   // 切过来的这一页可能已经发现过视频
         if (tvMode) {
             bindTvFocusTargets(wv)
             wv.requestFocus()

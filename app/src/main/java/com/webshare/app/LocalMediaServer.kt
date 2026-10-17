@@ -265,7 +265,7 @@ object LocalMediaServer {
   <div class="head">$title</div>
   <div class="meta">${DownloadService.fmtSize(entry.size)} · 已缓存到浏览器，不联网也能看</div>
   <video src="$url" controls autoplay playsinline preload="auto"></video>
-  <div class="note">这份视频存在 App 自己的目录里，在「缓存」页可以保存到手机或删掉。<br>
+  <div class="note">这份视频存在 App 自己的目录里，在「已下载 → 缓存视频」里可以保存到手机或删掉。<br>
     来源：<span class="src">${esc(entry.pageUrl)}</span></div>
   <div class="hint" id="hint">遥控器：←/→ 快退快进 10 秒 · OK 暂停/继续 · ↑/↓ 音量</div>
   <div class="hud" id="hud"></div>

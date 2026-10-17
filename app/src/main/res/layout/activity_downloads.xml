@@ -44,6 +44,71 @@
             android:visibility="gone" />
     </LinearLayout>
 
+    <!-- 两个标签：下载记录 / 缓存视频（网页里的视频长按底栏「已下载」缓存到这里） -->
+    <LinearLayout
+        android:id="@+id/tabRow"
+        android:layout_width="match_parent"
+        android:layout_height="48dp"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp">
+
+        <LinearLayout
+            android:id="@+id/tabDownloads"
+            android:layout_width="wrap_content"
+            android:layout_height="match_parent"
+            android:orientation="vertical"
+            android:gravity="center"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp"
+            android:background="?attr/selectableItemBackgroundBorderless">
+
+            <TextView
+                android:id="@+id/tabDownloadsText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="下载记录"
+                android:textSize="15sp"
+                android:textStyle="bold"
+                android:textColor="@color/purple_500" />
+
+            <View
+                android:id="@+id/tabDownloadsLine"
+                android:layout_width="20dp"
+                android:layout_height="2dp"
+                android:layout_marginTop="4dp"
+                android:background="@color/purple_500" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/tabCache"
+            android:layout_width="wrap_content"
+            android:layout_height="match_parent"
+            android:layout_marginStart="20dp"
+            android:orientation="vertical"
+            android:gravity="center"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp"
+            android:background="?attr/selectableItemBackgroundBorderless">
+
+            <TextView
+                android:id="@+id/tabCacheText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="缓存视频"
+                android:textSize="15sp"
+                android:textColor="#5F6368" />
+
+            <View
+                android:id="@+id/tabCacheLine"
+                android:layout_width="20dp"
+                android:layout_height="2dp"
+                android:layout_marginTop="4dp"
+                android:background="@color/purple_500"
+                android:visibility="invisible" />
+        </LinearLayout>
+    </LinearLayout>
 
     <!-- 批量选择模式的顶栏（长按任意一条进入）：退出 / 已选几项 / 全选 -->
     <LinearLayout
@@ -103,6 +168,13 @@
             android:layout_width="match_parent"
             android:layout_height="match_parent" />
 
+        <!-- 缓存视频（第二个标签的列表），和下载记录叠在同一块区域里，按标签切换显示 -->
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/cacheList"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:visibility="gone" />
+
         <LinearLayout
             android:id="@+id/emptyView"
             android:layout_width="wrap_content"
@@ -132,6 +204,39 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="4dp"
                 android:text="网页里点「存到手机」的文件会出现在这里"
+                android:textSize="13sp"
+                android:textColor="#9AA0A6" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/cacheEmptyView"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:orientation="vertical"
+            android:gravity="center"
+            android:visibility="gone">
+
+            <ImageView
+                android:layout_width="64dp"
+                android:layout_height="64dp"
+                android:src="@drawable/ic_nav_cache"
+                android:tint="#DADCE0"
+                android:contentDescription="@null" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="还没有缓存视频"
+                android:textSize="15sp"
+                android:textColor="#80868B" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="网页里放视频，长按底栏「已下载」开始缓存"
                 android:textSize="13sp"
                 android:textColor="#9AA0A6" />
         </LinearLayout>
