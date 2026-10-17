@@ -553,6 +553,9 @@ class MainActivity : AppCompatActivity() {
     private fun activateTvPage() {
         if (tvPageActive) return
         tvBackArmedForExit = false
+        // 进入页面这一下 OK 的「抬起」不要再当成一次点击：光标模式会点到光标处，
+        // 方向键模式会点到第一个元素（真机复现：刚进页面就把第一个按钮按了）
+        centerLongPressed = true
         val dpad = tabs.getOrNull(currentIndex)?.opMode == "dpad"
         setTvPageActive(true)
         if (!tvPageHintShown) {
