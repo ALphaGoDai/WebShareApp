@@ -94,6 +94,8 @@ class MainActivity : AppCompatActivity() {
      */
     private var tvPageActive = false
     private var tvPageHintShown = false
+    /** 电视上从网页按返回落到工具栏后，再按一次返回才退出（避免按一下返回就把 App 退了） */
+    private var tvBackArmedForExit = false
 
     /** 遥控器操作提示只弹一次（每进程） */
     private var tvHintShown = false
@@ -526,6 +528,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun activateTvPage() {
         if (tvPageActive) return
+        tvBackArmedForExit = false
         setTvPageActive(true)
         if (!tvPageHintShown) {
             tvPageHintShown = true
@@ -540,6 +543,7 @@ class MainActivity : AppCompatActivity() {
     /** 长按 OK / 菜单键：光标让位，焦点交给工具栏（落在当前标签圆片上） */
     private fun focusNativeControls() {
         val wv = tabs.getOrNull(currentIndex)?.webView ?: return
+        tvBackArmedForExit = false
         setTvPageActive(false)
         blurPageEditing(wv)
         val target = when {
@@ -593,6 +597,7 @@ class MainActivity : AppCompatActivity() {
         if (!tvMode) return
         val wv = tabs.getOrNull(currentIndex)?.webView ?: return
         tvPageActive = false
+        tvBackArmedForExit = false
         wv.post {
             if (hasWindowFocus() && !pageEditing.get()) wv.requestFocus()
         }
@@ -1270,14 +1275,14 @@ class MainActivity : AppCompatActivity() {
         }
         box.addView(label("备注名（语音快捷指令用，留空恢复原名）"))
         box.addView(aliasInput)
-        box.addView(label("页面字（底栏圆片只显示第一个字，留空＝按标题取首字）"))
+        box.addView(label("页面字（底栏圆片只显示第一个字，切换器卡片标题前也会用【】标出；留空＝按标题取首字、卡片不显示括号）"))
         box.addView(badgeInput)
 
         AlertDialog.Builder(this)
             .setTitle("编辑标签页")
             .setMessage(
                 "备注名同时是语音快捷指令的名字：对小艺说「打开" + getString(R.string.app_name) +
-                    "」＋备注名就能直达这一页；页面字只影响底栏圆片显示，和网页标题无关。"
+                    "」＋备注名就能直达这一页；页面字用于底栏圆片，也会显示在切换器卡片标题前，和网页标题无关。"
             )
             .setView(box)
             .setPositiveButton("确定") { _, _ ->
@@ -1326,6 +1331,7 @@ class MainActivity : AppCompatActivity() {
         wv.setOnFocusChangeListener { _, hasFocus ->
             if (tvMode) {
                 if (!hasFocus) tvPageActive = false
+                if (hasFocus) tvBackArmedForExit = false
                 val show = hasFocus && tvPageActive
                 wv.evaluateJavascript("window.__wsTvShow&&window.__wsTvShow($show)", null)
             }
@@ -1973,8 +1979,16 @@ class MainActivity : AppCompatActivity() {
                     setTvPageActive(false)
                     return
                 }
-                // 电视上焦点在工具栏（不在网页）时，返回先把焦点还给网页（只选中，不显示光标）
+                // 电视上焦点在工具栏（不在网页）时：
+                // - 从网页按返回落到工具栏的（tvBackArmedForExit）：再按一次返回才退出应用
+                // - 长按 OK / 菜单键进来的：返回把焦点还给网页（只选中，不显示光标）
                 if (tvMode && !webView.hasFocus()) {
+                    if (tvBackArmedForExit) {
+                        tvBackArmedForExit = false
+                        Log.i(TAG, "back: 工具栏再按一次返回，退出应用（保留 ${tabs.size} 个标签页）")
+                        finish()
+                        return
+                    }
                     setTvPageActive(false)
                     webView.requestFocus()
                     return
@@ -1994,8 +2008,19 @@ class MainActivity : AppCompatActivity() {
                             webView.goBackOrForward(-1)
                         }
                     }, 450)
+                } else if (tvMode) {
+                    // 电视：没有上一页时先回工具栏，不直接退出——焦点落到当前标签圆片
+                    // （圆片现在有醒目的焦点框），左右可以换页；再按一次返回才退出应用。
+                    // 电视遥控器的返回很容易连按，一下就把 App 退掉会让用户以为页面丢了。
+                    tvBackArmedForExit = true
+                    Log.i(
+                        TAG,
+                        "back: 电视上没有上一页，先回工具栏（还有 ${tabs.size} 个标签页，再按返回退出）"
+                    )
+                    (tabStrip.getChildAt(currentIndex) ?: menuButton).requestFocus()
+                    Toast.makeText(this, "再按一次返回退出应用", Toast.LENGTH_SHORT).show()
                 } else {
-                    // 这一页没有上一页：退出应用，但绝不顺手关标签页——
+                    // 手机：这一页没有上一页就退出应用，但绝不顺手关标签页——
                     // 用户要的是「返回键退出、页面还在」，关标签只能由他自己按 ✕。
                     // 退出直接 finish()：不要用 isEnabled=false + onBackPressed() 那套——
                     // 任务只是退到后台时 Activity 还活着，回调却一直停用，下次回来返回键会直接退出。
@@ -2188,6 +2213,7 @@ class MainActivity : AppCompatActivity() {
         persistTabs()
         if (tvMode) {
             tvPageActive = false
+            tvBackArmedForExit = false
             bindTvFocusTargets(wv)
             wv.requestFocus()
         }
@@ -2222,6 +2248,7 @@ class MainActivity : AppCompatActivity() {
             )
             if (tvMode) {
                 tvPageActive = false
+                tvBackArmedForExit = false
                 bindTvFocusTargets(wv)
                 wv.requestFocus()
             }
@@ -2469,6 +2496,7 @@ class MainActivity : AppCompatActivity() {
                 ViewGroup.FOCUS_AFTER_DESCENDANTS
             webView.isFocusable = true
             tvPageActive = false
+            tvBackArmedForExit = false
             tabs.getOrNull(currentIndex)?.webView?.requestFocus()
         }
     }
@@ -2614,9 +2642,12 @@ class MainActivity : AppCompatActivity() {
 
         override fun onBindViewHolder(holder: TabVH, position: Int) {
             val tab = tabs[position]
-            // 有备注名就显示备注名（备注名同时是语音快捷键的名字，按用户自己的叫法显示更好认）
-            holder.title.text = tab.alias?.takeIf { it.isNotBlank() }
+            // 有备注名就显示备注名（备注名同时是语音快捷键的名字，按用户自己的叫法显示更好认）。
+            // 设了「页面字」的，前面用【】把它标出来；没设就只显示标题，括号不要出现。
+            val name = tab.alias?.takeIf { it.isNotBlank() }
                 ?: tab.title.ifBlank { "新标签页" }
+            val badge = tab.badge?.takeIf { it.isNotBlank() }
+            holder.title.text = if (badge != null) "【$badge】$name" else name
             if (tab.thumb != null) {
                 holder.thumb.setImageBitmap(tab.thumb)
             } else {
