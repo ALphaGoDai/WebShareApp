@@ -235,8 +235,22 @@
                 android:layout_height="1dp"
                 android:layout_weight="1" />
 
-            <!-- 电视上给当前选中的卡片一个明确的「编辑 / 关闭」入口；
-                 手机上仍用长按标题和右上角 ✕，这两个按钮只在电视模式显示。 -->
+            <!-- 电视上给当前选中的卡片一个明确的「模式 / 编辑 / 关闭」入口；
+                 手机上仍用长按标题和右上角 ✕，这几个按钮只在电视模式显示。 -->
+            <TextView
+                android:id="@+id/switcherMode"
+                android:layout_width="wrap_content"
+                android:layout_height="match_parent"
+                android:gravity="center"
+                android:paddingStart="16dp"
+                android:paddingEnd="16dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:focusable="true"
+                android:text="模式：鼠标"
+                android:textSize="15sp"
+                android:textColor="@color/purple_500"
+                android:visibility="gone" />
+
             <TextView
                 android:id="@+id/switcherEdit"
                 android:layout_width="wrap_content"

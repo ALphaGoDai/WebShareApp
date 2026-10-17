@@ -1130,18 +1130,191 @@
       };
     }
 
+    // ---------- 上下左右模式（电视）：焦点在页面元素之间移动 ----------
+    // 有些页面（表单、列表、TV 页面）用遥控器直接选元素比挪虚拟鼠标圆点顺手。
+    // 原生把方向键原样交给 WebView，这里接管 keydown：按几何位置找下一个元素，
+    // 没有可去的元素就不 preventDefault，让 WebView 自己滚动页面。
+    var dpadOn = false;
+
+    function dpadFocusable(el) {
+      try {
+        if (!el || el.disabled) return false;
+        if (el.getAttribute && el.getAttribute('tabindex') === '-1') return false;
+        var tag = (el.tagName || '').toUpperCase();
+        if (tag === 'INPUT' && (el.type || '').toLowerCase() === 'hidden') return false;
+        var r = el.getBoundingClientRect();
+        if (r.width < 3 || r.height < 3) return false;
+        var cs = getComputedStyle(el);
+        if (!cs || cs.visibility === 'hidden' || cs.display === 'none') return false;
+        if (parseFloat(cs.opacity || '1') === 0) return false;
+        return true;
+      } catch (e) {
+        return false;
+      }
+    }
+
+    function dpadFocusables() {
+      var list = [];
+      try {
+        list = document.querySelectorAll(
+          'a[href],button,input,select,textarea,summary,[tabindex],' +
+          '[contenteditable="true"],[onclick],[role="button"]'
+        );
+      } catch (e) {
+        return [];
+      }
+      var out = [];
+      for (var i = 0; i < list.length; i++) {
+        if (dpadFocusable(list[i])) out.push(list[i]);
+      }
+      return out;
+    }
+
+    function dpadFocus(el) {
+      try {
+        var tag = (el.tagName || '').toUpperCase();
+        var native = tag === 'A' || tag === 'BUTTON' || tag === 'INPUT' ||
+          tag === 'SELECT' || tag === 'TEXTAREA' || tag === 'SUMMARY' ||
+          el.isContentEditable || el.hasAttribute('tabindex');
+        // 很多页面用 div/li + onclick 当按钮，它们本身不能聚焦，临时补个 tabindex
+        if (!native) el.setAttribute('tabindex', '-1');
+        el.focus();
+        if (el.scrollIntoView) el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      } catch (e) {}
+    }
+
+    /** 按屏幕上的相对位置找当前元素左/右/上/下的最近焦点目标 */
+    function dpadMove(dir) {
+      var els = dpadFocusables();
+      if (!els.length) return false;
+      var cur = document.activeElement;
+      if (!cur || els.indexOf(cur) < 0) {
+        dpadFocus(els[0]);
+        return true;
+      }
+      var cr = cur.getBoundingClientRect();
+      var cx = cr.left + cr.width / 2;
+      var cy = cr.top + cr.height / 2;
+      var best = null;
+      var bestScore = 1e9;
+      for (var i = 0; i < els.length; i++) {
+        var el = els[i];
+        if (el === cur) continue;
+        var r = el.getBoundingClientRect();
+        var dx = (r.left + r.width / 2) - cx;
+        var dy = (r.top + r.height / 2) - cy;
+        if (dir === 'left' && dx > -2) continue;
+        if (dir === 'right' && dx < 2) continue;
+        if (dir === 'up' && dy > -2) continue;
+        if (dir === 'down' && dy < 2) continue;
+        var horizontal = dir === 'left' || dir === 'right';
+        var primary = horizontal ? Math.abs(dx) : Math.abs(dy);
+        var secondary = horizontal ? Math.abs(dy) : Math.abs(dx);
+        var score = primary + secondary * 2.5;
+        if (score < bestScore) {
+          bestScore = score;
+          best = el;
+        }
+      }
+      if (!best) return false;
+      dpadFocus(best);
+      return true;
+    }
+
+    function dpadEnsureStyle() {
+      try {
+        if (document.getElementById('__wsDpadStyle')) return;
+        var st = document.createElement('style');
+        st.id = '__wsDpadStyle';
+        st.textContent =
+          '*:focus{outline:3px solid #7C4DFF !important;outline-offset:2px !important;}';
+        (document.head || document.documentElement).appendChild(st);
+      } catch (e) {}
+    }
+
+    function dpadSet(on) {
+      dpadOn = !!on;
+      if (!dpadOn) return;
+      dpadEnsureStyle();
+      try { show(false); } catch (e) {}
+      var cur = document.activeElement;
+      var hasFocus = cur && cur !== document.body && cur !== document.documentElement;
+      if (!hasFocus) {
+        var els = dpadFocusables();
+        if (els.length) dpadFocus(els[0]);
+      }
+    }
+
+    function dpadClick() {
+      if (!dpadOn) return false;
+      var el = document.activeElement;
+      if (!el || el === document.body || el === document.documentElement) {
+        var els = dpadFocusables();
+        if (!els.length) return false;
+        el = els[0];
+        dpadFocus(el);
+      }
+      var tag = (el.tagName || '').toUpperCase();
+      if (tag === 'SELECT') {
+        try { el.click(); } catch (e) {}
+        return true;
+      }
+      if (isEditable(el)) return 'editable';
+      try { el.click(); } catch (e) {}
+      return true;
+    }
+
+    function dpadKey(e) {
+      if (!dpadOn) return;
+      var dir = e.key === 'ArrowUp' ? 'up' : e.key === 'ArrowDown' ? 'down' :
+                e.key === 'ArrowLeft' ? 'left' : e.key === 'ArrowRight' ? 'right' : null;
+      if (dir) {
+        if (dpadMove(dir)) {
+          e.preventDefault();
+          e.stopPropagation();
+        }
+        return;
+      }
+      if (e.key === 'Enter' || e.key === ' ') {
+        var el = document.activeElement;
+        if (!el || el === document.body || el === document.documentElement) return;
+        var tag = (el.tagName || '').toUpperCase();
+        if (tag === 'SELECT' || isEditable(el)) return;   // 选择框/输入框自己处理
+        e.preventDefault();
+        try { el.click(); } catch (err) {}
+      }
+    }
+
+    try { document.addEventListener('keydown', dpadKey, true); } catch (e) {}
+    // 焦点换了之后保证目标在屏幕里（scrollIntoView 在部分 Android WebView 上无效时兜底）
+    try {
+      document.addEventListener('focusin', function(ev) {
+        if (!dpadOn || !ev.target || !ev.target.getBoundingClientRect) return;
+        var r = ev.target.getBoundingClientRect();
+        if (r.top < 0) {
+          try { window.scrollBy(0, r.top - 40); } catch (e) {}
+        } else if (r.bottom > window.innerHeight) {
+          try { window.scrollBy(0, r.bottom - window.innerHeight + 40); } catch (e) {}
+        }
+      }, true);
+    } catch (e) {}
+
     return {
       show: show,
       move: move,
       click: click,
       media: media,
       point: point,
+      dpad: dpadSet,
+      dpadClick: dpadClick,
       isEditable: function() { return isEditable(document.activeElement); },
       isEditableNode: function(node) { return isEditable(node); }
     };
   })();
 
   window.__wsTvShow = function(v) { tv.show(v); };
+  window.__wsTvDpad = function(on) { tv.dpad(on); };
+  window.__wsTvDpadClick = function() { return tv.dpadClick(); };
   window.__wsTvMove = function(dx, dy) { tv.move(dx, dy); };
   window.__wsTvClick = function() { return tv.click(); };
   window.__wsTvMedia = function(a) { return tv.media(a); };

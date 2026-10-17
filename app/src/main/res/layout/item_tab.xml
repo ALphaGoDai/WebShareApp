@@ -27,6 +27,17 @@
             android:textSize="12sp"
             android:textColor="#202124" />
 
+        <TextView
+            android:id="@+id/tabMode"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="end|center_vertical"
+            android:layout_marginEnd="36dp"
+            android:text="方向键"
+            android:textSize="10sp"
+            android:textColor="@color/purple_500"
+            android:visibility="gone" />
+
         <ImageButton
             android:id="@+id/tabClose"
             android:layout_width="30dp"

@@ -125,6 +125,13 @@ class MainActivity : AppCompatActivity() {
 
         /** 底栏圆片上显示的字（用户单独设的，和标题/别名无关；空 = 默认取标题首个字） */
         var badge: String? = null
+
+        /**
+         * 电视上的操作方式：cursor = 虚拟鼠标圆点（默认，通用），
+         * dpad = 上下左右直接在页面元素之间移动焦点（适合 TV 页面/表单/列表）。
+         * 只影响电视，手机上始终是触摸操作。
+         */
+        var opMode: String = "cursor"
     }
 
     private val tabs = mutableListOf<Tab>()
@@ -523,20 +530,37 @@ class MainActivity : AppCompatActivity() {
     private fun setTvPageActive(active: Boolean) {
         if (!tvMode) return
         tvPageActive = active
-        tabs.getOrNull(currentIndex)?.webView?.let { wv ->
-            wv.evaluateJavascript("window.__wsTvShow&&window.__wsTvShow($active)", null)
-        }
+        val tab = tabs.getOrNull(currentIndex) ?: return
+        applyTvPageState(tab, active && tab.webView.hasFocus())
+    }
+
+    /**
+     * 按标签页自己的操作方式同步页面状态：
+     * - cursor：显示/隐藏虚拟鼠标圆点（原来的行为）
+     * - dpad：启用/关闭页面里的焦点导航（上下左右在 a/button/input 之间移动）
+     */
+    private fun applyTvPageState(tab: Tab?, active: Boolean) {
+        val t = tab ?: return
+        val wv = t.webView
+        val dpad = t.opMode == "dpad"
+        wv.evaluateJavascript(
+            "window.__wsTvDpad&&window.__wsTvDpad(${active && dpad});" +
+                "window.__wsTvShow&&window.__wsTvShow(${active && !dpad})",
+            null
+        )
     }
 
     private fun activateTvPage() {
         if (tvPageActive) return
         tvBackArmedForExit = false
+        val dpad = tabs.getOrNull(currentIndex)?.opMode == "dpad"
         setTvPageActive(true)
         if (!tvPageHintShown) {
             tvPageHintShown = true
             Toast.makeText(
                 this,
-                "已进入网页：方向键移动圆点，OK 点击；长按 OK / 菜单键回工具栏",
+                if (dpad) "已进入网页：方向键选择元素，OK 点击/输入；长按 OK / 菜单键回工具栏"
+                else "已进入网页：方向键移动圆点，OK 点击；长按 OK / 菜单键回工具栏",
                 Toast.LENGTH_SHORT
             ).show()
         }
@@ -715,7 +739,20 @@ class MainActivity : AppCompatActivity() {
 
         // 对话框/输入法/别的窗口在前台时不抢键；输入框在编辑时方向键归网页
         if (!hasWindowFocus() || !wv.hasFocus()) return super.dispatchKeyEvent(event)
-        if (pageEditing.get()) return super.dispatchKeyEvent(event)
+        if (pageEditing.get()) {
+            // 「上下左右」模式：输入框有焦点、但键盘被返回键收起时，OK 负责再把键盘叫出来；
+            // 其余按键仍交给网页（键盘开着时由输入法自己处理）
+            val tab = tabs.getOrNull(currentIndex)
+            val isOk = key == KeyEvent.KEYCODE_DPAD_CENTER || key == KeyEvent.KEYCODE_ENTER ||
+                key == KeyEvent.KEYCODE_NUMPAD_ENTER
+            if (tab?.opMode == "dpad" && tvPageActive && isOk &&
+                event.action == KeyEvent.ACTION_UP
+            ) {
+                showImeForWebView(wv)
+                return true
+            }
+            return super.dispatchKeyEvent(event)
+        }
         if (isLocalPlayerPage(wv.url)) return super.dispatchKeyEvent(event)
 
         // 网页只是被选中、还没进入：方向键不移动光标、也不让 WebView 拿去滚页面；
@@ -736,6 +773,42 @@ class MainActivity : AppCompatActivity() {
                         activateTvPage()
                     }
                     return true
+                }
+                else -> return super.dispatchKeyEvent(event)
+            }
+        }
+
+        // 「上下左右」操作方式：方向键/OK 交给页面（shim 在 a/button/input 之间移动焦点），
+        // 不再驱动虚拟鼠标圆点
+        if (tabs.getOrNull(currentIndex)?.opMode == "dpad") {
+            when (key) {
+                KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN,
+                KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT ->
+                    return super.dispatchKeyEvent(event)
+                KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER,
+                KeyEvent.KEYCODE_NUMPAD_ENTER -> {
+                    when (event.action) {
+                        KeyEvent.ACTION_DOWN -> {
+                            if (event.repeatCount == 0) {
+                                centerLongPressed = false
+                                val runnable = Runnable {
+                                    centerLongPressed = true
+                                    focusNativeControls()
+                                }
+                                centerLongPress = runnable
+                                wv.postDelayed(runnable, 550)
+                            }
+                            return true
+                        }
+                        KeyEvent.ACTION_UP -> {
+                            centerLongPress?.let { wv.removeCallbacks(it) }
+                            centerLongPress = null
+                            if (!centerLongPressed) dpadClick(wv)
+                            centerLongPressed = false
+                            return true
+                        }
+                        else -> return true
+                    }
                 }
                 else -> return super.dispatchKeyEvent(event)
             }
@@ -1260,6 +1333,7 @@ class MainActivity : AppCompatActivity() {
             tab.pendingUrl = s.url
             tab.alias = s.alias.takeIf { it.isNotEmpty() }
             tab.badge = s.badge.takeIf { it.isNotEmpty() }
+            tab.opMode = if (s.mode == "dpad") "dpad" else "cursor"
             tabs.add(tab)
         }
         currentIndex = saved.current
@@ -1396,12 +1470,20 @@ class MainActivity : AppCompatActivity() {
             if (tvMode) {
                 if (!hasFocus) tvPageActive = false
                 if (hasFocus) tvBackArmedForExit = false
-                val show = hasFocus && tvPageActive
-                wv.evaluateJavascript("window.__wsTvShow&&window.__wsTvShow($show)", null)
+                val tab = tabs.firstOrNull { it.webView === wv }
+                applyTvPageState(tab, hasFocus && tvPageActive)
             }
         }
         iface.tvEditingListener = { editing ->
-            if (tabs.getOrNull(currentIndex)?.iface === iface) pageEditing.set(editing)
+            val tab = tabs.getOrNull(currentIndex)
+            if (tab != null && tab.iface === iface) {
+                pageEditing.set(editing)
+                // 「上下左右」模式：焦点移到输入框上就直接把电视键盘叫出来，
+                // 不用再按一次 OK（方向键这时归输入框/键盘）
+                if (editing && tvMode && tab.opMode == "dpad" && tvPageActive) {
+                    wv.postDelayed({ showImeForWebView(wv) }, 180)
+                }
+            }
         }
 
         val settings = wv.settings
@@ -1734,8 +1816,8 @@ class MainActivity : AppCompatActivity() {
                         "tv page: url=$url bfSize=${bf.size} bfIndex=${bf.currentIndex} " +
                             "canGoBack=${view.canGoBack()} [$items]"
                     )
-                    val show = if (view.hasFocus() && tvPageActive) "true" else "false"
-                    view.evaluateJavascript("window.__wsTvShow&&window.__wsTvShow($show)", null)
+                    val tab = tabs.firstOrNull { it.webView === view }
+                    applyTvPageState(tab, view.hasFocus() && tvPageActive)
                 }
                 // 记下标签页标题/地址，切换器卡片和角标用
                 tabs.firstOrNull { it.webView === view }?.let { tab ->
@@ -2167,6 +2249,20 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * 「上下左右」模式下的 OK：点击页面里当前获得焦点的元素。
+     * shim 返回 "editable" 表示焦点在输入框上——这时不点击，只把电视输入法叫出来。
+     */
+    private fun dpadClick(wv: WebView) {
+        wv.evaluateJavascript(
+            "window.__wsTvDpadClick?window.__wsTvDpadClick():false"
+        ) { raw ->
+            if (raw != null && raw.trim() == "\"editable\"") {
+                wv.postDelayed({ showImeForWebView(wv) }, 120)
+            }
+        }
+    }
+
     private fun loadUrl(force: Boolean = false) {
         val baseUrl = settingsManager.url.trim()
         if (baseUrl.isEmpty()) {
@@ -2334,7 +2430,12 @@ class MainActivity : AppCompatActivity() {
             // 本机离线播放页（127.0.0.1/p/…）每次进程重启端口和令牌都会变，存下来也是死链
             if (isLocalPlayerPage(raw)) continue
             if (i == currentIndex) savedCurrent = saved.size
-            saved.add(TabStore.SavedTab(withoutSharedParam(raw), tab.title, tab.alias ?: "", tab.badge ?: ""))
+            saved.add(
+                TabStore.SavedTab(
+                    withoutSharedParam(raw), tab.title, tab.alias ?: "", tab.badge ?: "",
+                    tab.opMode
+                )
+            )
         }
         if (saved.isNotEmpty() && savedCurrent >= 0) {
             TabStore.save(this, saved, savedCurrent, commit)
@@ -2546,37 +2647,72 @@ class MainActivity : AppCompatActivity() {
             val edit = findViewById<TextView>(R.id.switcherEdit)
             val close = findViewById<TextView>(R.id.switcherClose)
             val newTab = findViewById<TextView>(R.id.btnNewTab)
+            val modeBtn = findViewById<TextView>(R.id.switcherMode)
             edit.visibility = View.VISIBLE
             close.visibility = View.VISIBLE
+            modeBtn.visibility = View.VISIBLE
             edit.foreground = ContextCompat.getDrawable(this, R.drawable.bg_tv_focus)
             close.foreground = ContextCompat.getDrawable(this, R.drawable.bg_tv_focus)
             newTab.foreground = ContextCompat.getDrawable(this, R.drawable.bg_tv_focus)
+            modeBtn.foreground = ContextCompat.getDrawable(this, R.drawable.bg_tv_focus)
             // 模拟器/触摸过的电视会停在 touch mode，不置这个标志 requestFocus 会被忽略
             edit.isFocusableInTouchMode = true
             close.isFocusableInTouchMode = true
             newTab.isFocusableInTouchMode = true
-            newTab.nextFocusRightId = R.id.switcherEdit
-            edit.nextFocusLeftId = R.id.btnNewTab
+            modeBtn.isFocusableInTouchMode = true
+            newTab.nextFocusRightId = R.id.switcherMode
+            modeBtn.nextFocusLeftId = R.id.btnNewTab
+            modeBtn.nextFocusRightId = R.id.switcherEdit
+            edit.nextFocusLeftId = R.id.switcherMode
             edit.nextFocusRightId = R.id.switcherClose
             close.nextFocusLeftId = R.id.switcherEdit
+            modeBtn.setOnClickListener { toggleSwitcherFocusedMode() }
             edit.setOnClickListener {
                 val p = switcherFocusPosition
                 if (p in tabs.indices) editTabAlias(p)
             }
             close.setOnClickListener { closeSwitcherFocusedTab() }
+            updateSwitcherModeLabel()
             // 让遥控器直接落到当前标签页的卡片上；网格还没布局好就等一帧再试
             tabGrid.scrollToPosition(currentIndex)
             focusSwitcherCard(currentIndex, 120)
         } else {
+            findViewById<View>(R.id.switcherMode).visibility = View.GONE
             findViewById<View>(R.id.switcherEdit).visibility = View.GONE
             findViewById<View>(R.id.switcherClose).visibility = View.GONE
         }
+    }
+
+    /** 切换器「模式」按钮的文字跟着焦点所在卡片变：模式：鼠标 / 模式：方向键 */
+    private fun updateSwitcherModeLabel() {
+        val btn = findViewById<TextView>(R.id.switcherMode)
+        val dpad = tabs.getOrNull(switcherFocusPosition)?.opMode == "dpad"
+        btn.text = if (dpad) "模式：方向键" else "模式：鼠标"
+    }
+
+    /** 切换当前焦点所在标签页的电视操作方式：鼠标圆点 ⇄ 上下左右 */
+    private fun toggleSwitcherFocusedMode() {
+        val p = switcherFocusPosition
+        val tab = tabs.getOrNull(p) ?: return
+        tab.opMode = if (tab.opMode == "dpad") "cursor" else "dpad"
+        persistTabs()
+        tabAdapter.notifyItemChanged(p)
+        updateSwitcherModeLabel()
+        Toast.makeText(
+            this,
+            if (tab.opMode == "dpad")
+                "这个标签页：上下左右直接选元素（再点一次「模式」换回鼠标）"
+            else
+                "这个标签页：鼠标圆点（按 OK 进入后出现圆点）",
+            Toast.LENGTH_SHORT
+        ).show()
     }
 
     /** 把遥控器焦点放回切换器里的某张卡片（网格没布局好时退到底部的「新建标签页」） */
     private fun focusSwitcherCard(position: Int, delay: Long = 0) {
         val p = position.coerceIn(0, maxOf(tabs.lastIndex, 0))
         switcherFocusPosition = p
+        updateSwitcherModeLabel()
         val focus = Runnable {
             val vh = tabGrid.findViewHolderForAdapterPosition(p) as? TabVH
             val target: View = vh?.itemView ?: findViewById(R.id.btnNewTab)
@@ -2756,6 +2892,13 @@ class MainActivity : AppCompatActivity() {
                 ?: tab.title.ifBlank { "新标签页" }
             val badge = tab.badge?.takeIf { it.isNotBlank() }
             holder.title.text = if (badge != null) "【$badge】$name" else name
+            // 电视上给「上下左右」模式的标签页挂个小标记，一眼区分用鼠标圆点的那些
+            val dpadMode = tab.opMode == "dpad"
+            holder.mode.visibility = if (tvMode && dpadMode) View.VISIBLE else View.GONE
+            (holder.title.layoutParams as? FrameLayout.LayoutParams)?.let { lp ->
+                lp.marginEnd = dp(if (tvMode && dpadMode) 78 else 34)
+                holder.title.layoutParams = lp
+            }
             if (tab.thumb != null) {
                 holder.thumb.setImageBitmap(tab.thumb)
             } else {
@@ -2784,10 +2927,16 @@ class MainActivity : AppCompatActivity() {
                     ContextCompat.getDrawable(this@MainActivity, R.drawable.bg_tv_focus)
                 // 记住焦点在哪张卡片上：切换器底部的「编辑 / 关闭」作用于它
                 holder.itemView.setOnFocusChangeListener { _, hasFocus ->
-                    if (hasFocus) switcherFocusPosition = position
+                    if (hasFocus) {
+                        switcherFocusPosition = position
+                        updateSwitcherModeLabel()
+                    }
                 }
                 holder.close.setOnFocusChangeListener { _, hasFocus ->
-                    if (hasFocus) switcherFocusPosition = position
+                    if (hasFocus) {
+                        switcherFocusPosition = position
+                        updateSwitcherModeLabel()
+                    }
                 }
                 // 电视上点卡片右上角的 ✕ 也走「关完把焦点交给下一张」，不会关完就没焦点
                 holder.close.setOnClickListener {
@@ -2797,8 +2946,8 @@ class MainActivity : AppCompatActivity() {
                 // 最后一行的卡片按 ↓ 直接落到操作条，别在网格里打转
                 val lastRowStart = ((tabs.size - 1) / 2) * 2
                 if (position >= lastRowStart) {
-                    holder.itemView.nextFocusDownId = R.id.switcherEdit
-                    holder.close.nextFocusDownId = R.id.switcherEdit
+                    holder.itemView.nextFocusDownId = R.id.switcherMode
+                    holder.close.nextFocusDownId = R.id.switcherMode
                 }
             }
         }
@@ -2807,6 +2956,7 @@ class MainActivity : AppCompatActivity() {
     private class TabVH(view: View) : RecyclerView.ViewHolder(view) {
         val header: View = view.findViewById(R.id.tabHeader)
         val title: TextView = view.findViewById(R.id.tabTitle)
+        val mode: TextView = view.findViewById(R.id.tabMode)
         val thumb: ImageView = view.findViewById(R.id.tabThumb)
         val close: ImageButton = view.findViewById(R.id.tabClose)
     }
