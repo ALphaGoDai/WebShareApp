@@ -31,120 +31,75 @@
                 android:visibility="gone" />
         </FrameLayout>
 
-        <!-- 底部导航栏：设置 / 已下载（长按=缓存这一页的视频） / 标签页（带数量角标） / 刷新（长按=清缓存强刷） -->
+        <!-- 底部导航栏：左边是当前标签页（首字母，太多了左右箭头翻），右边三条线按钮点开菜单 -->
         <LinearLayout
             android:id="@+id/bottomBar"
             android:layout_width="match_parent"
             android:layout_height="56dp"
             android:orientation="horizontal"
+            android:gravity="center_vertical"
             android:background="@color/white"
-            android:elevation="8dp">
+            android:elevation="8dp"
+            android:paddingStart="4dp"
+            android:paddingEnd="2dp">
 
-            <LinearLayout
-                android:id="@+id/navSettings"
+            <ImageButton
+                android:id="@+id/tabScrollLeft"
+                android:layout_width="28dp"
+                android:layout_height="match_parent"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:contentDescription="向左翻标签页"
+                android:padding="6dp"
+                android:scaleType="centerInside"
+                android:src="@drawable/ic_tab_left"
+                android:tint="#5F6368"
+                android:visibility="gone" />
+
+            <HorizontalScrollView
+                android:id="@+id/tabScroll"
                 android:layout_width="0dp"
                 android:layout_height="match_parent"
                 android:layout_weight="1"
-                android:orientation="vertical"
-                android:gravity="center"
-                android:background="?attr/selectableItemBackgroundBorderless">
+                android:fillViewport="false"
+                android:scrollbars="none">
+
+                <LinearLayout
+                    android:id="@+id/tabStrip"
+                    android:layout_width="wrap_content"
+                    android:layout_height="match_parent"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal" />
+            </HorizontalScrollView>
+
+            <ImageButton
+                android:id="@+id/tabScrollRight"
+                android:layout_width="28dp"
+                android:layout_height="match_parent"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:contentDescription="向右翻标签页"
+                android:padding="6dp"
+                android:scaleType="centerInside"
+                android:src="@drawable/ic_tab_right"
+                android:tint="#5F6368"
+                android:visibility="gone" />
+
+            <FrameLayout
+                android:id="@+id/menuButton"
+                android:layout_width="52dp"
+                android:layout_height="match_parent"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:clickable="true"
+                android:focusable="true"
+                android:contentDescription="菜单">
 
                 <ImageView
-                    android:layout_width="24dp"
-                    android:layout_height="24dp"
-                    android:src="@drawable/ic_nav_settings"
-                    android:tint="@color/purple_500"
-                    android:contentDescription="@string/settings_title" />
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="2dp"
-                    android:text="设置"
-                    android:textSize="10sp"
-                    android:textColor="#5F6368" />
-            </LinearLayout>
-
-            <LinearLayout
-                android:id="@+id/navDownloads"
-                android:layout_width="0dp"
-                android:layout_height="match_parent"
-                android:layout_weight="1"
-                android:orientation="vertical"
-                android:gravity="center"
-                android:background="?attr/selectableItemBackgroundBorderless">
-
-                <ImageView
-                    android:layout_width="24dp"
-                    android:layout_height="24dp"
-                    android:src="@drawable/ic_nav_downloads"
-                    android:tint="@color/purple_500"
-                    android:contentDescription="@string/downloads_title" />
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="2dp"
-                    android:text="已下载"
-                    android:textSize="10sp"
-                    android:textColor="#5F6368" />
-            </LinearLayout>
-
-            <LinearLayout
-                android:id="@+id/navTabs"
-                android:layout_width="0dp"
-                android:layout_height="match_parent"
-                android:layout_weight="1"
-                android:orientation="vertical"
-                android:gravity="center"
-                android:background="?attr/selectableItemBackgroundBorderless">
-
-                <TextView
-                    android:id="@+id/tabBadge"
-                    android:layout_width="24dp"
-                    android:layout_height="24dp"
-                    android:background="@drawable/bg_tab_count"
-                    android:contentDescription="@string/tabs_title"
-                    android:gravity="center"
-                    android:includeFontPadding="false"
-                    android:text="1"
-                    android:textColor="@color/purple_500"
-                    android:textSize="12sp"
-                    android:textStyle="bold" />
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="2dp"
-                    android:text="标签页"
-                    android:textSize="10sp"
-                    android:textColor="#5F6368" />
-            </LinearLayout>
-
-            <LinearLayout
-                android:id="@+id/navRefresh"
-                android:layout_width="0dp"
-                android:layout_height="match_parent"
-                android:layout_weight="1"
-                android:orientation="vertical"
-                android:gravity="center"
-                android:background="?attr/selectableItemBackgroundBorderless">
-
-                <ImageView
-                    android:layout_width="24dp"
-                    android:layout_height="24dp"
-                    android:src="@drawable/ic_nav_refresh"
-                    android:tint="@color/purple_500"
-                    android:contentDescription="刷新页面" />
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="2dp"
-                    android:text="刷新"
-                    android:textSize="10sp"
-                    android:textColor="#5F6368" />
-            </LinearLayout>
+                    android:layout_width="26dp"
+                    android:layout_height="26dp"
+                    android:layout_gravity="center"
+                    android:contentDescription="@null"
+                    android:src="@drawable/ic_menu_hamburger"
+                    android:tint="@color/purple_500" />
+            </FrameLayout>
         </LinearLayout>
     </LinearLayout>
 
@@ -274,4 +229,112 @@
                 android:textColor="#202124" />
         </LinearLayout>
     </FrameLayout>
+
+    <!-- 点右下角三条线弹出的菜单：竖向排列（刷新 / 已下载 / 设置）。
+         下面这层透明遮罩负责"点别处收起菜单"，不挡网页的正常使用（菜单关着时是 gone）。 -->
+    <View
+        android:id="@+id/navMenuScrim"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:clickable="true"
+        android:focusable="false"
+        android:visibility="gone" />
+
+    <LinearLayout
+        android:id="@+id/navMenu"
+        android:layout_width="150dp"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|end"
+        android:layout_marginEnd="10dp"
+        android:layout_marginBottom="64dp"
+        android:background="@drawable/bg_nav_menu"
+        android:elevation="16dp"
+        android:orientation="vertical"
+        android:padding="6dp"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:id="@+id/menuRefresh"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp">
+
+            <ImageView
+                android:layout_width="22dp"
+                android:layout_height="22dp"
+                android:contentDescription="@null"
+                android:src="@drawable/ic_nav_refresh"
+                android:tint="@color/purple_500" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="12dp"
+                android:text="刷新"
+                android:textColor="#202124"
+                android:textSize="15sp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/menuDownloads"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp">
+
+            <ImageView
+                android:layout_width="22dp"
+                android:layout_height="22dp"
+                android:contentDescription="@null"
+                android:src="@drawable/ic_nav_downloads"
+                android:tint="@color/purple_500" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="12dp"
+                android:text="已下载"
+                android:textColor="#202124"
+                android:textSize="15sp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/menuSettings"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp">
+
+            <ImageView
+                android:layout_width="22dp"
+                android:layout_height="22dp"
+                android:contentDescription="@null"
+                android:src="@drawable/ic_nav_settings"
+                android:tint="@color/purple_500" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="12dp"
+                android:text="设置"
+                android:textColor="#202124"
+                android:textSize="15sp" />
+        </LinearLayout>
+    </LinearLayout>
 </FrameLayout>

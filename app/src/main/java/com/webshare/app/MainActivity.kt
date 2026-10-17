@@ -6,12 +6,16 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Rect
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
 import android.provider.OpenableColumns
 import android.util.Log
+import android.util.TypedValue
+import android.view.Gravity
 import android.view.KeyEvent
 import android.view.LayoutInflater
 import android.view.MotionEvent
@@ -27,6 +31,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
 import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -51,7 +56,20 @@ class MainActivity : AppCompatActivity() {
     private lateinit var webViewContainer: FrameLayout
     private lateinit var tabSwitcher: FrameLayout
     private lateinit var tabGrid: RecyclerView
-    private lateinit var tabBadge: TextView
+
+    /** 底栏：左边标签页首字母（可左右翻），右边三条线按钮弹出 刷新/已下载/设置 */
+    private lateinit var tabStrip: LinearLayout
+    private lateinit var tabScroll: HorizontalScrollView
+    private lateinit var tabScrollLeft: View
+    private lateinit var tabScrollRight: View
+    private lateinit var menuButton: View
+    private lateinit var navMenu: View
+    private lateinit var navMenuScrim: View
+
+    /** 标签条内容的签名（首字母/选中项没变就不重建，免得电视上焦点被冲掉） */
+    private var tabStripSignature = ""
+    /** 上次把哪一页的圆片滚进可视区：只在真的换了页时滚，别把用户手动翻的位置拉回来 */
+    private var revealedTabIndex = -1
 
     /** 底部那条「此网站请求打开 App」提示（网页要跳 douban:// 之类时出现） */
     private lateinit var openAppBar: View
@@ -262,7 +280,13 @@ class MainActivity : AppCompatActivity() {
         webViewContainer = findViewById(R.id.webViewContainer)
         tabSwitcher = findViewById(R.id.tabSwitcher)
         tabGrid = findViewById(R.id.tabGrid)
-        tabBadge = findViewById(R.id.tabBadge)
+        tabStrip = findViewById(R.id.tabStrip)
+        tabScroll = findViewById(R.id.tabScroll)
+        tabScrollLeft = findViewById(R.id.tabScrollLeft)
+        tabScrollRight = findViewById(R.id.tabScrollRight)
+        menuButton = findViewById(R.id.menuButton)
+        navMenu = findViewById(R.id.navMenu)
+        navMenuScrim = findViewById(R.id.navMenuScrim)
         openAppBar = findViewById(R.id.openAppBar)
         openAppIcon = findViewById(R.id.openAppIcon)
         openAppName = findViewById(R.id.openAppName)
@@ -332,26 +356,34 @@ class MainActivity : AppCompatActivity() {
         val bar = findViewById<View>(R.id.bottomBar)
         bar.layoutParams = bar.layoutParams.apply { height = dp(64) }
 
+        // 底栏：左右翻页箭头、三条线按钮，以及它弹出的三个菜单项，遥控器都要能选中
         val navIds = intArrayOf(
-            R.id.navSettings, R.id.navDownloads, R.id.navTabs, R.id.navRefresh
+            R.id.tabScrollLeft, R.id.tabScrollRight, R.id.menuButton,
+            R.id.menuRefresh, R.id.menuDownloads, R.id.menuSettings
         )
         for (id in navIds) {
             val item = findViewById<View>(id)
             item.isFocusable = true
             item.foreground = ContextCompat.getDrawable(this, R.drawable.bg_tv_focus)
-            val group = item as? ViewGroup ?: continue
+        }
+        // 菜单面板在电视上离底栏（64dp）再高一点，别贴着标签条
+        (navMenu.layoutParams as? ViewGroup.MarginLayoutParams)?.bottomMargin = dp(76)
+        for (id in intArrayOf(R.id.menuRefresh, R.id.menuDownloads, R.id.menuSettings)) {
+            setMenuItemTextSize(findViewById<View>(id))
+        }
+        (menuButton as? ViewGroup)?.let { group ->
             for (i in 0 until group.childCount) {
-                when (val child = group.getChildAt(i)) {
-                    is TextView -> child.textSize = 12f
-                    is ImageView -> {
-                        val lp = child.layoutParams
-                        lp.width = dp(28)
-                        lp.height = dp(28)
-                        child.layoutParams = lp
-                    }
+                val child = group.getChildAt(i)
+                if (child is ImageView) {
+                    val lp = child.layoutParams
+                    lp.width = dp(28)
+                    lp.height = dp(28)
+                    child.layoutParams = lp
                 }
             }
         }
+        // 菜单项之间上下走，左右不跑出去；最后一项按「下」回到三条线按钮
+        bindMenuFocusChain()
 
         // 浮条往上挪一点，别被加高后的底栏盖住
         val stack = findViewById<View>(R.id.popupStack)
@@ -375,18 +407,53 @@ class MainActivity : AppCompatActivity() {
         maybeShowTvHint()
     }
 
-    /** 工具栏每一项按「上」都回到网页；网页长按 OK 切出来落到工具栏 */
+    private fun setMenuItemTextSize(item: View) {
+        val group = item as? ViewGroup ?: return
+        for (i in 0 until group.childCount) {
+            when (val child = group.getChildAt(i)) {
+                is TextView -> child.textSize = 16f
+                is ImageView -> {
+                    val lp = child.layoutParams
+                    lp.width = dp(26)
+                    lp.height = dp(26)
+                    child.layoutParams = lp
+                }
+            }
+        }
+    }
+
+    private fun bindMenuFocusChain() {
+        val refresh = findViewById<View>(R.id.menuRefresh)
+        val downloads = findViewById<View>(R.id.menuDownloads)
+        val settings = findViewById<View>(R.id.menuSettings)
+        refresh.nextFocusUpId = R.id.menuButton
+        refresh.nextFocusDownId = R.id.menuDownloads
+        downloads.nextFocusUpId = R.id.menuRefresh
+        downloads.nextFocusDownId = R.id.menuSettings
+        settings.nextFocusUpId = R.id.menuDownloads
+        settings.nextFocusDownId = R.id.menuButton
+        for (v in arrayOf(refresh, downloads, settings)) {
+            v.nextFocusLeftId = v.id
+            v.nextFocusRightId = v.id
+        }
+    }
+
+    /** 工具栏每一项按「上」都回到网页；网页长按 OK 切出来落到三条线按钮 */
     private fun bindTvFocusTargets(wv: WebView) {
         val wvId = wv.id
         if (wvId == View.NO_ID) return
         for (id in intArrayOf(
-            R.id.navSettings, R.id.navDownloads, R.id.navTabs, R.id.navRefresh,
+            R.id.tabScrollLeft, R.id.tabScrollRight, R.id.menuButton,
+            R.id.menuRefresh, R.id.menuDownloads, R.id.menuSettings,
             R.id.openAppGo
         )) {
             findViewById<View>(id).nextFocusUpId = wvId
         }
-        wv.nextFocusDownId = R.id.navRefresh
-        findViewById<View>(R.id.openAppGo).nextFocusDownId = R.id.navRefresh
+        for (i in 0 until tabStrip.childCount) {
+            tabStrip.getChildAt(i).nextFocusUpId = wvId
+        }
+        wv.nextFocusDownId = R.id.menuButton
+        findViewById<View>(R.id.openAppGo).nextFocusDownId = R.id.menuButton
     }
 
     /** 长按 OK / 菜单键：光标让位，焦点交给工具栏 */
@@ -396,12 +463,12 @@ class MainActivity : AppCompatActivity() {
         wv.evaluateJavascript("window.__wsTvShow&&window.__wsTvShow(false)", null)
         val target = when {
             openAppBar.visibility == View.VISIBLE -> findViewById<View>(R.id.openAppGo)
-            else -> findViewById<View>(R.id.navRefresh)
+            else -> menuButton
         }
         target.requestFocus()
         Toast.makeText(
             this,
-            "已切到工具栏：左右选按钮、OK 按下；按 ↑ 或菜单键回到网页",
+            "已切到工具栏：左右选标签页，OK 打开菜单；按 ↑ 或菜单键回到网页",
             Toast.LENGTH_SHORT
         ).show()
     }
@@ -464,6 +531,10 @@ class MainActivity : AppCompatActivity() {
 
         if (key == KeyEvent.KEYCODE_MENU || key == KeyEvent.KEYCODE_INFO) {
             if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                if (navMenu.visibility == View.VISIBLE) {
+                    hideNavMenu()
+                    return true
+                }
                 val wv = tabs.getOrNull(currentIndex)?.webView
                 if (wv != null) {
                     if (wv.hasFocus()) focusNativeControls() else wv.requestFocus()
@@ -1081,6 +1152,7 @@ class MainActivity : AppCompatActivity() {
                 persistTabs()
                 syncVoiceShortcuts()
                 tabAdapter.notifyItemChanged(index)
+                updateTabStrip()
                 Toast.makeText(
                     this,
                     if (v.isEmpty()) "已恢复原名"
@@ -1460,6 +1532,7 @@ class MainActivity : AppCompatActivity() {
                 tabs.firstOrNull { it.webView === view }?.let { tab ->
                     tab.title = view?.title?.takeIf { it.isNotBlank() } ?: tab.title
                     tab.url = url ?: tab.url
+                    updateTabStrip()   // 底栏圆片取标题首字，换页后跟着变
                     persistTabs()
                 }
                 if (currentSharedText != null) {
@@ -1625,56 +1698,107 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setupBottomBar() {
-        // 轻点=普通刷新，长按=强制刷新（清缓存）
-        findViewById<View>(R.id.navRefresh).setOnClickListener {
-            webView.reload()
+        // 右下角三条线：竖向弹出「刷新 / 已下载 / 设置」
+        menuButton.setOnClickListener {
+            markOwnUi()
+            if (navMenu.visibility == View.VISIBLE) hideNavMenu() else showNavMenu()
         }
-        findViewById<View>(R.id.navRefresh).setOnLongClickListener {
-            // Visual feedback for long press
-            val bar = findViewById<View>(R.id.bottomBar)
-            bar.alpha = 0.5f
-            Toast.makeText(this, "正在清除缓存并刷新（登录状态保留）...", Toast.LENGTH_SHORT).show()
+        // 点菜单外面（遮罩）收起
+        navMenuScrim.setOnClickListener { hideNavMenu() }
 
-            // Clear all caches
-            webView.clearCache(true)
-            webView.clearHistory()
-            // 注意：这里不清 Cookie —— Cookie 是各网站的登录状态，不是缓存。
-            // 原来顺手 removeAllCookies 会让用户"强制刷新一下就退出所有网站登录"。
-            // 真要清登录状态去 设置 → 清除所有网站登录状态（Cookie）。
-            flushCookies()
+        // 标签页多了：左右两侧出现翻页箭头，标签条本身也能横向滑
+        tabScroll.setOnScrollChangeListener { _, _, _, _, _ -> updateTabScrollButtons() }
+        tabScrollLeft.setOnClickListener {
+            markOwnUi()
+            scrollTabStrip(-1)
+        }
+        tabScrollRight.setOnClickListener {
+            markOwnUi()
+            scrollTabStrip(1)
+        }
+        tabScroll.post { updateTabScrollButtons() }
 
-            // Reload with cache bypass
-            webView.settings.cacheMode = WebSettings.LOAD_NO_CACHE
-            webView.reload()
-
-            // Reset cache mode after a delay
-            webView.postDelayed({
-                webView.settings.cacheMode = WebSettings.LOAD_DEFAULT
-                bar.alpha = 1.0f
-            }, 3000)
-
+        // 轻点=普通刷新，长按=强制刷新（清缓存，登录状态保留）
+        findViewById<View>(R.id.menuRefresh).setOnClickListener {
+            hideNavMenu()
+            reloadCurrentPage()
+        }
+        findViewById<View>(R.id.menuRefresh).setOnLongClickListener {
+            hideNavMenu()
+            clearCacheAndReload()
             true
         }
 
-        findViewById<View>(R.id.navSettings).setOnClickListener {
-            markOwnUi()
-            settingsLauncher?.launch(Intent(this, SettingsActivity::class.java))
-        }
-
-        findViewById<View>(R.id.navDownloads).setOnClickListener {
+        findViewById<View>(R.id.menuDownloads).setOnClickListener {
+            hideNavMenu()
             markOwnUi()
             startActivity(Intent(this, DownloadsActivity::class.java))
         }
         // 长按「已下载」= 缓存这一页在放的视频（不再每页弹浮条）
-        findViewById<View>(R.id.navDownloads).setOnLongClickListener {
+        findViewById<View>(R.id.menuDownloads).setOnLongClickListener {
+            hideNavMenu()
             markOwnUi()
             startCacheFromPage()
             true
         }
 
-        findViewById<View>(R.id.navTabs).setOnClickListener {
-            userTouchedSinceStart = true   // 用户在翻标签页了，到点自动打开就别再插手
-            openTabSwitcher()
+        findViewById<View>(R.id.menuSettings).setOnClickListener {
+            hideNavMenu()
+            markOwnUi()
+            settingsLauncher?.launch(Intent(this, SettingsActivity::class.java))
+        }
+    }
+
+    private fun reloadCurrentPage() {
+        if (currentIndex !in tabs.indices) return
+        webView.reload()
+    }
+
+    private fun clearCacheAndReload() {
+        if (currentIndex !in tabs.indices) return
+        val bar = findViewById<View>(R.id.bottomBar)
+        bar.alpha = 0.5f
+        Toast.makeText(this, "正在清除缓存并刷新（登录状态保留）...", Toast.LENGTH_SHORT).show()
+
+        webView.clearCache(true)
+        webView.clearHistory()
+        // 注意：这里不清 Cookie —— Cookie 是各网站的登录状态，不是缓存。
+        // 原来顺手 removeAllCookies 会让用户"强制刷新一下就退出所有网站登录"。
+        // 真要清登录状态去 设置 → 清除所有网站登录状态（Cookie）。
+        flushCookies()
+
+        webView.settings.cacheMode = WebSettings.LOAD_NO_CACHE
+        webView.reload()
+        webView.postDelayed({
+            webView.settings.cacheMode = WebSettings.LOAD_DEFAULT
+            bar.alpha = 1.0f
+        }, 3000)
+    }
+
+    private fun showNavMenu() {
+        if (navMenu.visibility == View.VISIBLE) return
+        navMenu.visibility = View.VISIBLE
+        navMenuScrim.visibility = View.VISIBLE
+        navMenu.alpha = 0f
+        navMenu.translationY = dp(8).toFloat()
+        navMenu.animate().alpha(1f).translationY(0f).setDuration(140).start()
+        if (tvMode) {
+            // 菜单开着时，三条线按钮按「上」回到菜单最后一项，别跳回网页
+            menuButton.nextFocusUpId = R.id.menuSettings
+            findViewById<View>(R.id.menuRefresh).post {
+                findViewById<View>(R.id.menuRefresh).requestFocus()
+            }
+        }
+    }
+
+    private fun hideNavMenu() {
+        if (navMenu.visibility != View.VISIBLE) return
+        navMenu.visibility = View.GONE
+        navMenuScrim.visibility = View.GONE
+        if (tvMode) {
+            val wvId = tabs.getOrNull(currentIndex)?.webView?.id ?: View.NO_ID
+            if (wvId != View.NO_ID) menuButton.nextFocusUpId = wvId
+            if (menuButton.isShown) menuButton.requestFocus()
         }
     }
 
@@ -1684,6 +1808,11 @@ class MainActivity : AppCompatActivity() {
                 // 网页全屏时，返回先退出全屏
                 if (customView != null) {
                     hideCustomViewNow()
+                    return
+                }
+                // 右下角菜单开着时，返回先收起它
+                if (navMenu.visibility == View.VISIBLE) {
+                    hideNavMenu()
                     return
                 }
                 // 标签页切换器开着时，返回先关它
@@ -1887,6 +2016,7 @@ class MainActivity : AppCompatActivity() {
     private fun switchTo(index: Int) {
         if (index !in tabs.indices) return
         hideOpenAppBar()   // 换标签页了，上一条"打开 App"的提示过期
+        hideNavMenu()
         if (currentIndex in tabs.indices && currentIndex != index) {
             captureThumb(tabs[currentIndex])
         }
@@ -1906,7 +2036,7 @@ class MainActivity : AppCompatActivity() {
                 )
             )
         }
-        updateTabBadge()
+        updateTabStrip()
         hideTabSwitcher()
         persistTabs()
         if (tvMode) {
@@ -1947,7 +2077,7 @@ class MainActivity : AppCompatActivity() {
                 wv.requestFocus()
             }
         }
-        updateTabBadge()
+        updateTabStrip()
         tabAdapter.notifyDataSetChanged()
         persistTabs()
     }
@@ -2015,11 +2145,126 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun updateTabBadge() {
-        tabBadge.text = tabs.size.toString()
+    /** 标签页名字的第一个字（英文取大写首字母）：底栏位置窄，一个圆片就够了 */
+    private fun tabInitial(tab: Tab): String {
+        val name = tab.alias?.takeIf { it.isNotBlank() } ?: tab.title
+        // 书名号/引号这类开头没有信息量，取第一个「字」或数字
+        val c = name.firstOrNull { it.isLetterOrDigit() }
+            ?: name.trim().firstOrNull { !it.isWhitespace() }
+            ?: return "•"
+        return if (c.isLetter()) c.uppercaseChar().toString() else c.toString()
+    }
+
+    /**
+     * 底栏的标签条：每页一个圆片，当前页紫色。名字/数量变了才重建（网页换页会不停来回调，
+     * 重建会打断滑动和遥控器焦点）；只换选中页时走下面那半段轻量更新。
+     */
+    private fun updateTabStrip() {
+        val names = tabs.map { (it.alias?.takeIf { a -> a.isNotBlank() } ?: it.title).trim() }
+        val sig = names.joinToString("\u0001")
+        if (sig != tabStripSignature || tabStrip.childCount != tabs.size) {
+            tabStripSignature = sig
+            val keepScroll = tabScroll.scrollX
+            tabStrip.removeAllViews()
+            for (tab in tabs) tabStrip.addView(buildTabChip(tab))
+            tabScroll.post {
+                tabScroll.scrollTo(keepScroll, 0)
+                updateTabScrollButtons()
+            }
+        }
+        val onBg = ContextCompat.getDrawable(this, R.drawable.bg_tab_chip_on)
+        val offBg = ContextCompat.getDrawable(this, R.drawable.bg_tab_chip)
+        for (i in 0 until tabStrip.childCount) {
+            val chip = tabStrip.getChildAt(i) as? TextView ?: continue
+            val on = i == currentIndex
+            chip.isSelected = on
+            chip.background = if (on) onBg else offBg
+            chip.setTextColor(if (on) Color.WHITE else Color.parseColor("#5F6368"))
+        }
+        if (tvMode) {
+            val wvId = tabs.getOrNull(currentIndex)?.webView?.id ?: View.NO_ID
+            if (wvId != View.NO_ID) {
+                for (i in 0 until tabStrip.childCount) {
+                    tabStrip.getChildAt(i).nextFocusUpId = wvId
+                }
+            }
+        }
+        if (currentIndex != revealedTabIndex) {
+            revealedTabIndex = currentIndex
+            revealCurrentChip()
+        }
+    }
+
+    /** 当前页的圆片滚进可视范围（标签多了以后切页不会切到看不见的地方） */
+    private fun revealCurrentChip() {
+        val chip = tabStrip.getChildAt(currentIndex) ?: return
+        tabScroll.post {
+            val viewLeft = tabScroll.scrollX
+            val viewRight = viewLeft + tabScroll.width
+            val target = when {
+                chip.left < viewLeft + dp(4) -> chip.left - dp(4)
+                chip.right > viewRight - dp(4) -> chip.right - tabScroll.width + dp(4)
+                else -> -1
+            }
+            if (target >= 0) tabScroll.smoothScrollTo(target.coerceAtLeast(0), 0)
+            updateTabScrollButtons()
+        }
+    }
+
+    private fun buildTabChip(tab: Tab): TextView {
+        val size = dp(28)
+        val chip = TextView(this)
+        chip.text = tabInitial(tab)
+        chip.gravity = Gravity.CENTER
+        chip.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+        chip.includeFontPadding = false
+        chip.isSingleLine = true
+        chip.isClickable = true
+        chip.isFocusable = tvMode
+        chip.contentDescription =
+            (tab.alias?.takeIf { it.isNotBlank() } ?: tab.title.ifBlank { "新标签页" })
+        val lp = LinearLayout.LayoutParams(size, size)
+        lp.marginStart = dp(3)
+        lp.marginEnd = dp(3)
+        chip.layoutParams = lp
+        chip.setOnClickListener {
+            markOwnUi()
+            val index = tabs.indexOf(tab)
+            if (index >= 0) switchTo(index)
+        }
+        // 标签页管理（切换器/关闭/备注名）挪到长按圆片：底栏只留一个「三条线」
+        chip.setOnLongClickListener {
+            markOwnUi()
+            userTouchedSinceStart = true
+            val index = tabs.indexOf(tab)
+            if (index >= 0) switchTo(index)
+            openTabSwitcher()
+            true
+        }
+        if (tvMode) {
+            chip.foreground = ContextCompat.getDrawable(this, R.drawable.bg_tv_focus)
+            val wvId = tabs.getOrNull(currentIndex)?.webView?.id ?: View.NO_ID
+            if (wvId != View.NO_ID) chip.nextFocusUpId = wvId
+        }
+        return chip
+    }
+
+    /** 标签条超出可视宽度时，左右两侧各露一个翻页箭头 */
+    private fun updateTabScrollButtons() {
+        val canLeft = tabScroll.canScrollHorizontally(-1)
+        val canRight = tabScroll.canScrollHorizontally(1)
+        tabScrollLeft.visibility = if (canLeft) View.VISIBLE else View.GONE
+        tabScrollRight.visibility = if (canRight) View.VISIBLE else View.GONE
+    }
+
+    private fun scrollTabStrip(dir: Int) {
+        val amount = (tabScroll.width * 2 / 3).coerceAtLeast(dp(80)) * dir
+        tabScroll.smoothScrollBy(amount, 0)
+        tabScroll.postDelayed({ updateTabScrollButtons() }, 300)
     }
 
     private fun openTabSwitcher() {
+        hideNavMenu()
         captureThumb(tabs[currentIndex])
         tabAdapter.notifyDataSetChanged()
         tabSwitcher.visibility = View.VISIBLE
