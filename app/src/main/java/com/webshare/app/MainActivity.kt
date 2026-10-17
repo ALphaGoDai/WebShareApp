@@ -2558,8 +2558,8 @@ class MainActivity : AppCompatActivity() {
             // 让遥控器直接落到当前标签页的卡片标题上；网格还没布局好就等一帧再试
             tabGrid.scrollToPosition(currentIndex)
             tabGrid.postDelayed({
-                val holder = tabGrid.findViewHolderForAdapterPosition(currentIndex)
-                val target: View = holder?.header ?: holder?.itemView
+                val vh = tabGrid.findViewHolderForAdapterPosition(currentIndex) as? TabVH
+                val target: View = vh?.header ?: vh?.itemView
                     ?: findViewById(R.id.btnNewTab)
                 target.requestFocus()
             }, 120)
@@ -2579,8 +2579,8 @@ class MainActivity : AppCompatActivity() {
         val next = p.coerceAtMost(tabs.lastIndex)
         switcherFocusPosition = next
         tabGrid.postDelayed({
-            val holder = tabGrid.findViewHolderForAdapterPosition(next)
-            val target: View = holder?.header ?: holder?.itemView
+            val vh = tabGrid.findViewHolderForAdapterPosition(next) as? TabVH
+            val target: View = vh?.header ?: vh?.itemView
                 ?: findViewById(R.id.btnNewTab)
             target.requestFocus()
         }, 150)
