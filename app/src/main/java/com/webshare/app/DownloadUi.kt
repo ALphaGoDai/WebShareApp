@@ -199,16 +199,18 @@ object DownloadOpenFab {
 
     private var popup: PopupWindow? = null
     private var anchor: View? = null
+    private var restoreFocus: View? = null
     private val hide = Runnable { dismiss() }
 
     fun show(activity: Activity, uriStr: String, name: String?, mime: String?) {
         if (activity.isFinishing || activity.isDestroyed) return
         dismiss()
+        val tv = TvMode.isTv(activity)
         val density = activity.resources.displayMetrics.density
         val label = TextView(activity).apply {
             text = "立即打开"
             setTextColor(Color.WHITE)
-            textSize = if (TvMode.isTv(activity)) 16f else 15f
+            textSize = if (tv) 16f else 15f
             setTypeface(typeface, Typeface.BOLD)
             gravity = Gravity.CENTER
             setPadding((20 * density).toInt(), (11 * density).toInt(),
@@ -218,6 +220,12 @@ object DownloadOpenFab {
                 cornerRadius = 24 * density
             }
             isClickable = true
+            if (tv) {
+                // 电视上让遥控器能选中它：3 秒内按 OK 直接打开
+                isFocusable = true
+                isFocusableInTouchMode = true
+                foreground = ContextCompat.getDrawable(activity, R.drawable.bg_tv_focus)
+            }
             setOnClickListener {
                 dismiss()
                 DownloadUi.openFile(activity, uriStr, name, mime)
@@ -230,7 +238,7 @@ object DownloadOpenFab {
             false
         ).apply {
             isOutsideTouchable = false
-            isFocusable = false
+            isFocusable = tv
             elevation = 16 * density
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
         }
@@ -240,7 +248,8 @@ object DownloadOpenFab {
             return
         }
         anchor = root
-        val y = ((if (TvMode.isTv(activity)) 40 else 56) + 14) * density
+        if (tv) restoreFocus = activity.currentFocus
+        val y = ((if (tv) 40 else 56) + 14) * density
         try {
             p.showAtLocation(root, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL, 0, y.toInt())
         } catch (e: Exception) {
@@ -248,6 +257,7 @@ object DownloadOpenFab {
             dismiss()
             return
         }
+        if (tv) label.post { label.requestFocus() }
         root.postDelayed(hide, 3000)
     }
 
@@ -256,5 +266,9 @@ object DownloadOpenFab {
         anchor = null
         runCatching { popup?.dismiss() }
         popup = null
+        restoreFocus?.let { prev ->
+            restoreFocus = null
+            if (prev.isAttachedToWindow) prev.post { prev.requestFocus() }
+        }
     }
 }
