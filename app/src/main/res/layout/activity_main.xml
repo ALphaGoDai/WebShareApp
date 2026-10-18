@@ -29,6 +29,19 @@
                 android:progress="0"
                 android:progressTint="@color/purple_500"
                 android:visibility="gone" />
+
+            <!-- 电视「网页被选中」的焦点框。不能再用 WebView 的 foreground：
+                 WebView 内部滚动时会平移 foreground，框会跟着页面跑（v1.0.77 起改成
+                 这个固定覆盖层，位置只跟窗口走）。 -->
+            <View
+                android:id="@+id/pageFocusRing"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:background="@drawable/bg_tv_page_focus"
+                android:clickable="false"
+                android:focusable="false"
+                android:importantForAccessibility="no"
+                android:visibility="gone" />
         </FrameLayout>
 
         <!-- 底部导航栏：左边是当前标签页（首字母，太多了左右箭头翻），右边三条线按钮点开菜单 -->
@@ -361,6 +374,35 @@
                 android:layout_height="wrap_content"
                 android:layout_marginStart="12dp"
                 android:text="新建页面"
+                android:textColor="#202124"
+                android:textSize="15sp" />
+        </LinearLayout>
+
+        <!-- 标签页切换器入口：长按圆片的菜单里已去掉「标签页列表」，挪到三条线菜单 -->
+        <LinearLayout
+            android:id="@+id/menuTabs"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp">
+
+            <ImageView
+                android:layout_width="22dp"
+                android:layout_height="22dp"
+                android:contentDescription="@null"
+                android:src="@drawable/ic_nav_tabs"
+                android:tint="@color/purple_500" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="12dp"
+                android:text="标签页"
                 android:textColor="#202124"
                 android:textSize="15sp" />
         </LinearLayout>
