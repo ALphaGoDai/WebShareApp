@@ -64,6 +64,25 @@ object DownloadNaming {
             .trim()
         return cleaned.ifBlank { "download.bin" }.take(180)
     }
+
+    /**
+     * 打开文件用的 MIME。网页给的下载类型经常是 application/octet-stream（GitHub 的
+     * release 资产就是这样），照它去 ACTION_VIEW 找不到任何应用——尤其是 .apk：
+     * 电视/手机的安装器只认 application/vnd.android.package-archive，必须按扩展名补上。
+     */
+    fun resolveMime(name: String?, mime: String?): String {
+        val given = mime?.trim().orEmpty()
+        val ext = name?.substringAfterLast('.', "")?.lowercase().orEmpty()
+        if (ext == "apk") return APK_MIME
+        val generic = given.isEmpty() || given == "*/*" ||
+            given.equals("application/octet-stream", ignoreCase = true)
+        if (generic) {
+            MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)?.let { return it }
+        }
+        return given.ifEmpty { "application/octet-stream" }
+    }
+
+    const val APK_MIME = "application/vnd.android.package-archive"
 }
 
 /** 下载前的「保存到哪个目录」确认框 */

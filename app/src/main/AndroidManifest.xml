@@ -12,6 +12,9 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 从「已下载」直接安装 APK（点击下载记录→系统安装器）。Android 8+ 不声明这个，
+         安装器不会把本应用算作「可以安装未知应用」的来源，点了也装不上。 -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <!-- 网页 getUserMedia 录音（轰轰爱学习的语音跟读）：WebView 侧要 onPermissionRequest 放行 -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <!-- 「到某地自动打开」：只在打开 App 那一刻读一次位置做判定（见 GeoRule.kt），

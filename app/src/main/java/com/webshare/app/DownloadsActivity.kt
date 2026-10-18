@@ -255,14 +255,22 @@ class DownloadsActivity : AppCompatActivity() {
 
     private fun open(rec: DownloadRecord) {
         val uriStr = rec.savedUri ?: return
+        // 网页给的 MIME 经常是 octet-stream；.apk 必须换成安装器认的类型，
+        // 否则电视上的 packageinstaller 根本不在候选里（用户看到「没有应用能打开」）。
+        val mime = DownloadNaming.resolveMime(rec.displayName.ifBlank { rec.name }, rec.mime)
         val intent = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(Uri.parse(uriStr), rec.mime.ifEmpty { "*/*" })
+            setDataAndType(Uri.parse(uriStr), mime)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         try {
             startActivity(intent)
         } catch (e: Exception) {
-            Toast.makeText(this, "没有应用能打开这种文件", Toast.LENGTH_SHORT).show()
+            Toast.makeText(
+                this,
+                if (mime == DownloadNaming.APK_MIME) "没有找到安装程序，无法安装这个文件"
+                else "没有应用能打开这种文件",
+                Toast.LENGTH_SHORT
+            ).show()
         }
     }
 

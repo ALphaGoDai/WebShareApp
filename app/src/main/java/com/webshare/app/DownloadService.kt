@@ -448,7 +448,7 @@ class DownloadService : Service() {
 
     private fun notifyDone(name: String, uri: Uri, mime: String, repairNote: String = "") {
         val openIntent = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(uri, mime)
+            setDataAndType(uri, DownloadNaming.resolveMime(name, mime))
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         val pi = PendingIntent.getActivity(

@@ -1734,7 +1734,9 @@ class MainActivity : AppCompatActivity() {
         }
 
         val name = DownloadNaming.fileName(url, contentDisposition, mimeType)
-        val mime = mimeType?.takeIf { it.isNotBlank() } ?: "application/octet-stream"
+        // 服务器常把 .apk 标成 octet-stream；保存时就换成安装器认的类型，
+        // 下载记录和完成通知里的「打开」才找得到 packageinstaller。
+        val mime = DownloadNaming.resolveMime(name, mimeType)
         val request = PendingDownload(url, name, mime)
 
         val store = SaveLocationStore(this)
