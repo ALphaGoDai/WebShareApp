@@ -497,12 +497,19 @@ class MainActivity : AppCompatActivity() {
     private fun bindTvFocusTargets(wv: WebView) {
         val wvId = wv.id
         if (wvId == View.NO_ID) return
+        // 菜单项不在这里指回网页：它们在 bindMenuFocusChain 里自己串成一条链，
+        // 页面加载完（这个方法会重跑）若把每一项的 nextFocusUpId 改成 wvId，
+        // 菜单开着时按「上」会跳出菜单、焦点落到网页上，菜单却还挂着。
         for (id in intArrayOf(
             R.id.tabScrollLeft, R.id.tabScrollRight, R.id.menuButton,
-            R.id.menuNewTab, R.id.menuRefresh, R.id.menuDownloads, R.id.menuSettings,
             R.id.openAppGo
         )) {
             findViewById<View>(id).nextFocusUpId = wvId
+        }
+        if (navMenu.visibility == View.VISIBLE) {
+            // 菜单开着时页面刚好加载完：把菜单内的上下链和三条线按钮的「上」重新绑回来
+            bindMenuFocusChain()
+            menuButton.nextFocusUpId = R.id.menuSettings
         }
         for (i in 0 until tabStrip.childCount) {
             tabStrip.getChildAt(i).nextFocusUpId = wvId
@@ -2146,6 +2153,7 @@ class MainActivity : AppCompatActivity() {
         navMenu.animate().alpha(1f).translationY(0f).setDuration(140).start()
         if (tvMode) {
             // 菜单开着时，三条线按钮按「上」回到菜单最后一项，左右也被菜单吸住，别跳回网页/标签条
+            bindMenuFocusChain()
             menuButton.nextFocusUpId = R.id.menuSettings
             menuButton.nextFocusLeftId = R.id.menuButton
             menuButton.nextFocusRightId = R.id.menuButton
