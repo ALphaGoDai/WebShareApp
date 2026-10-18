@@ -85,6 +85,19 @@ class SettingsManager(context: Context) {
             }
             prefs.edit().putInt(KEY_SETTINGS_VERSION, 3).apply()
         }
+        if (version < 4) {
+            // v1.0.78 起默认页从 send 换成家庭日历 date。只在用户没改过、或存的正是
+            // 旧的 send 默认地址时才换；自己填过别的起始页就保留。
+            val oldUrl = (prefs.getString(KEY_URL, "") ?: "").trim()
+            val legacy = setOf(
+                "http://send.nbhonghong.top:7777",
+                "https://send.nbhonghong.top:7777"
+            )
+            if (oldUrl.isEmpty() || oldUrl.trimEnd('/') in legacy) {
+                prefs.edit().putString(KEY_URL, DEFAULT_URL).apply()
+            }
+            prefs.edit().putInt(KEY_SETTINGS_VERSION, 4).apply()
+        }
     }
 
     companion object {
@@ -100,7 +113,7 @@ class SettingsManager(context: Context) {
         private const val KEY_GEO_RADIUS = "geo_radius"
         private const val KEY_GEO_URL = "geo_url"
         const val DEFAULT_GEO_RADIUS = 300
-        const val DEFAULT_URL = "http://send.nbhonghong.top:7777/"
+        const val DEFAULT_URL = "https://date.nbhonghong.top:7777/"
         const val DEFAULT_DOH_URL = "https://doh.pub/dns-query"
         const val DEFAULT_UPDATE_URL =
             "https://github.com/ALphaGoDai/WebShareApp/releases/latest/download/DnsWeb.apk"
