@@ -25,17 +25,16 @@
             android:maxLines="1"
             android:textSize="15sp" />
 
-        <TextView
-            android:id="@+id/goBtn"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
+        <ImageButton
+            android:id="@+id/clearBtn"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:layout_marginStart="4dp"
             android:background="?attr/selectableItemBackgroundBorderless"
-            android:padding="10dp"
-            android:text="访问"
-            android:textColor="@color/purple_500"
-            android:textSize="15sp"
-            android:textStyle="bold" />
+            android:contentDescription="清空输入框"
+            android:padding="9dp"
+            android:src="@drawable/ic_nav_close"
+            android:tint="#5F6368" />
     </LinearLayout>
 
     <!-- 最近访问过的地址（最多 5 条），点地址直接开新标签页，右侧 ✕ 删除该条 -->

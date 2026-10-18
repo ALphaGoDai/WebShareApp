@@ -3,7 +3,10 @@ package com.webshare.app
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Dialog
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Canvas
@@ -79,6 +82,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var openAppBar: View
     private lateinit var openAppIcon: ImageView
     private lateinit var openAppName: TextView
+
+    /** 下载完成广播：在前台时弹 3 秒「立即打开」浮按钮 */
+    private var downloadDoneReceiver: BroadcastReceiver? = null
 
     // ---------- 电视 / 遥控器 ----------
 
@@ -352,6 +358,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onStop() {
+        unregisterDownloadDoneReceiver()
         super.onStop()
         lastStoppedAt = SystemClock.elapsedRealtime()
         persistTabs(commit = true)   // 退到后台先把标签页记下来（同步落盘，进程随后被杀也带得走）
@@ -1026,7 +1033,37 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
+        registerDownloadDoneReceiver()
         maybeRefreshStartPage()
+    }
+
+    private fun registerDownloadDoneReceiver() {
+        if (downloadDoneReceiver != null) return
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action != DownloadService.ACTION_DONE) return
+                val uriStr = intent.getStringExtra(DownloadService.EXTRA_SAVED_URI) ?: return
+                DownloadOpenFab.show(
+                    this@MainActivity,
+                    uriStr,
+                    intent.getStringExtra(DownloadService.EXTRA_SAVED_NAME),
+                    intent.getStringExtra(DownloadService.EXTRA_MIME)
+                )
+            }
+        }
+        downloadDoneReceiver = receiver
+        ContextCompat.registerReceiver(
+            this,
+            receiver,
+            IntentFilter(DownloadService.ACTION_DONE),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+    }
+
+    private fun unregisterDownloadDoneReceiver() {
+        downloadDoneReceiver?.let { runCatching { unregisterReceiver(it) } }
+        downloadDoneReceiver = null
+        DownloadOpenFab.dismiss()
     }
 
     /**
@@ -2159,11 +2196,15 @@ class MainActivity : AppCompatActivity() {
         }
         tabScroll.post { updateTabScrollButtons() }
 
-        // 轻点=普通刷新。清缓存刷新挪到「长按标签卡片 → 刷新页面（长按）」，
-        // 三条线菜单里不再藏一个长按强制刷新（容易误触，也没必要）
+        // 轻点=普通刷新，长按=清缓存刷新（和标签页菜单里的「刷新页面」一致）
         findViewById<View>(R.id.menuRefresh).setOnClickListener {
             hideNavMenu()
             reloadCurrentPage()
+        }
+        findViewById<View>(R.id.menuRefresh).setOnLongClickListener {
+            hideNavMenu()
+            reloadTabAt(currentIndex, force = true)
+            true
         }
 
         findViewById<View>(R.id.menuDownloads).setOnClickListener {
@@ -2895,21 +2936,11 @@ class MainActivity : AppCompatActivity() {
             setPadding(dp(6), dp(6), dp(6), dp(6))
             background = ContextCompat.getDrawable(this@MainActivity, R.drawable.bg_nav_menu)
         }
-        val name = tab.alias?.takeIf { it.isNotBlank() }
-            ?: tab.title.ifBlank { "新标签页" }
-        panel.addView(TextView(this).apply {
-            text = name
-            textSize = 13f
-            setTextColor(Color.parseColor("#5F6368"))
-            maxLines = 1
-            ellipsize = android.text.TextUtils.TruncateAt.END
-            setPadding(dp(14), dp(10), dp(14), dp(6))
-        })
 
         val dialog = Dialog(this)
         dialog.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE)
 
-        val refreshRow = addTabMenuRow(panel, "刷新页面", "长按：清缓存并刷新", false) {
+        val refreshRow = addTabMenuRow(panel, "刷新页面", R.drawable.ic_nav_refresh) {
             dialog.dismiss()
             reloadTabAt(index, force = false)
         }
@@ -2918,31 +2949,25 @@ class MainActivity : AppCompatActivity() {
             reloadTabAt(index, force = true)
             true
         }
-        addTabMenuRow(panel, "编辑页面", "备注名 / 页面字", false) {
+        addTabMenuRow(panel, "编辑页面", R.drawable.ic_nav_edit) {
             dialog.dismiss()
             editTabAlias(index)
         }
         // 长按圆片已经不再进切换器，这里保留入口；从切换器卡片长按打开的菜单里
         // 切换器本来就开着，就不用再显示这一项了。
         if (tabSwitcher.visibility != View.VISIBLE) {
-            addTabMenuRow(panel, "标签页列表", "打开标签页切换器", false) {
+            addTabMenuRow(panel, "标签页列表", R.drawable.ic_nav_tabs) {
                 dialog.dismiss()
                 openTabSwitcher()
             }
         }
         if (tvMode) {
-            val dpad = tab.opMode == "dpad"
-            addTabMenuRow(
-                panel,
-                "页面操作方式",
-                if (dpad) "当前：方向键（选元素）" else "当前：鼠标（圆点）",
-                false
-            ) {
+            addTabMenuRow(panel, "页面操作方式", R.drawable.ic_nav_cursor) {
                 dialog.dismiss()
                 showTabModePicker(index)
             }
         }
-        addTabMenuRow(panel, "关闭页面", null, true) {
+        addTabMenuRow(panel, "关闭页面", R.drawable.ic_nav_close, danger = true) {
             dialog.dismiss()
             closeTabFromSwitcher(index)
         }
@@ -2952,36 +2977,43 @@ class MainActivity : AppCompatActivity() {
         // 的抬手会被当成外部点按，菜单刚弹出来就自己没了；等抬手过后再打开这个开关。
         dialog.setCanceledOnTouchOutside(false)
         dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-        dialog.window?.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
-        dialog.window?.setDimAmount(0.35f)
+        // 对话框主题默认会压暗背景；要和右下角菜单一样不挡网页，显式清掉
+        dialog.window?.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+        dialog.window?.setDimAmount(0f)
         dialog.show()
         dialog.window?.decorView?.postDelayed({
             runCatching { dialog.setCanceledOnTouchOutside(true) }
         }, 450)
         dialog.window?.let { win ->
-            win.setGravity(if (tvMode) Gravity.CENTER else Gravity.BOTTOM)
-            val width = if (tvMode) dp(440)
-            else (resources.displayMetrics.widthPixels - dp(24)).coerceAtLeast(dp(240))
-            win.setLayout(width, ViewGroup.LayoutParams.WRAP_CONTENT)
+            // 和右下角三条线菜单同款：底部靠右的小面板，不压暗网页
+            win.setGravity(Gravity.BOTTOM or Gravity.END)
+            val lp = win.attributes
+            lp.width = if (tvMode) dp(180) else dp(160)
+            lp.height = ViewGroup.LayoutParams.WRAP_CONTENT
+            lp.x = dp(10)
+            lp.y = if (tvMode) dp(52) else dp(64)
+            win.attributes = lp
         }
         // 电视上直接把焦点放到第一项，遥控器一进来就能上下选
-        if (tvMode) refreshRow.requestFocus()
+        if (tvMode) refreshRow.post { refreshRow.requestFocus() }
     }
 
-    /** 菜单里的一行（标题 + 可选小字）；电视上可聚焦并有焦点框 */
+    /** 标签页菜单的一行：和右下角三条线菜单同款（48dp 高、紫色图标、单行文字） */
     private fun addTabMenuRow(
         panel: LinearLayout,
         title: String,
-        subtitle: String?,
-        danger: Boolean,
+        iconRes: Int,
+        danger: Boolean = false,
         onClick: () -> Unit
     ): View {
+        val tint = if (danger) Color.parseColor("#D93025")
+        else ContextCompat.getColor(this, R.color.purple_500)
         val row = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
+            orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(14), dp(8), dp(14), dp(8))
+            setPadding(dp(12), 0, dp(12), 0)
             isClickable = true
-            background = selectableBackground()
+            background = selectableBackgroundBorderless()
             setOnClickListener { onClick() }
             if (tvMode) {
                 isFocusable = true
@@ -2989,25 +3021,25 @@ class MainActivity : AppCompatActivity() {
                 foreground = ContextCompat.getDrawable(this@MainActivity, R.drawable.bg_tv_focus)
             }
         }
+        val iconSize = dp(if (tvMode) 26 else 22)
+        row.addView(ImageView(this).apply {
+            setImageResource(iconRes)
+            setColorFilter(tint)
+            contentDescription = null
+        }, LinearLayout.LayoutParams(iconSize, iconSize))
         row.addView(TextView(this).apply {
             text = title
-            textSize = 16f
+            textSize = if (tvMode) 16f else 15f
             setTextColor(if (danger) Color.parseColor("#D93025") else Color.parseColor("#202124"))
-        })
-        if (!subtitle.isNullOrEmpty()) {
-            row.addView(TextView(this).apply {
-                text = subtitle
-                textSize = 11f
-                setTextColor(Color.parseColor("#5F6368"))
-                setPadding(0, dp(2), 0, 0)
-            })
-        }
+            setPadding(dp(12), 0, 0, 0)
+            isSingleLine = true
+        }, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ))
         panel.addView(
             row,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            )
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48))
         )
         return row
     }
@@ -3095,17 +3127,21 @@ class MainActivity : AppCompatActivity() {
     private fun showAddressBar() {
         val view = LayoutInflater.from(this).inflate(R.layout.view_address_bar, null)
         val input = view.findViewById<EditText>(R.id.addressInput)
-        val go = view.findViewById<TextView>(R.id.goBtn)
+        val clear = view.findViewById<ImageButton>(R.id.clearBtn)
         val historyBox = view.findViewById<LinearLayout>(R.id.historyList)
         input.setText(settingsManager.url.trim())
         val dialog = AlertDialog.Builder(this)
             .setTitle("新建标签页")
             .setView(view)
+            .setPositiveButton("访问", null)
             .setNegativeButton("取消", null)
             .create()
         fun launch() {
             val addr = input.text.toString().trim()
-            if (addr.isEmpty()) return
+            if (addr.isEmpty()) {
+                Toast.makeText(this, "请输入网址", Toast.LENGTH_SHORT).show()
+                return
+            }
             dialog.dismiss()
             openAddressInNewTab(addr)
         }
@@ -3167,7 +3203,15 @@ class MainActivity : AppCompatActivity() {
         }
         refreshHistory()
         attachTvIme(input)
-        go.setOnClickListener { launch() }
+        clear.setOnClickListener {
+            input.setText("")
+            input.requestFocus()
+            if (tvMode) showTvImeNow(input)
+        }
+        if (tvMode) {
+            clear.isFocusableInTouchMode = true
+            clear.foreground = ContextCompat.getDrawable(this, R.drawable.bg_tv_focus)
+        }
         input.setOnEditorActionListener { _, actionId, _ ->
             if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_GO) {
                 launch()
@@ -3177,6 +3221,8 @@ class MainActivity : AppCompatActivity() {
             }
         }
         dialog.show()
+        // 访问和取消并排放在对话框底部；输入为空时不关闭对话框
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener { launch() }
         input.selectAll()
         showTvImeNow(input)
     }

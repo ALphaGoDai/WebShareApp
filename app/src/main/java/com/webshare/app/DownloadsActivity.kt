@@ -1,7 +1,10 @@
 package com.webshare.app
 
+import android.content.BroadcastReceiver
 import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.Typeface
 import android.net.Uri
 import android.os.Bundle
@@ -37,6 +40,7 @@ class DownloadsActivity : AppCompatActivity() {
     private lateinit var adapter: Adapter
     private lateinit var emptyView: View
     private lateinit var clearButton: TextView
+    private var downloadDoneReceiver: BroadcastReceiver? = null
 
     // ---------- 两个标签 ----------
     private lateinit var tabRow: View
@@ -210,14 +214,45 @@ class DownloadsActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        registerDownloadDoneReceiver()
         reload()
         reloadCache()
         poll.postDelayed(pollRunner, 800)
     }
 
     override fun onPause() {
+        unregisterDownloadDoneReceiver()
         super.onPause()
         poll.removeCallbacks(pollRunner)
+    }
+
+    private fun registerDownloadDoneReceiver() {
+        if (downloadDoneReceiver != null) return
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action != DownloadService.ACTION_DONE) return
+                val uriStr = intent.getStringExtra(DownloadService.EXTRA_SAVED_URI) ?: return
+                DownloadOpenFab.show(
+                    this@DownloadsActivity,
+                    uriStr,
+                    intent.getStringExtra(DownloadService.EXTRA_SAVED_NAME),
+                    intent.getStringExtra(DownloadService.EXTRA_MIME)
+                )
+            }
+        }
+        downloadDoneReceiver = receiver
+        ContextCompat.registerReceiver(
+            this,
+            receiver,
+            IntentFilter(DownloadService.ACTION_DONE),
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+    }
+
+    private fun unregisterDownloadDoneReceiver() {
+        downloadDoneReceiver?.let { runCatching { unregisterReceiver(it) } }
+        downloadDoneReceiver = null
+        DownloadOpenFab.dismiss()
     }
 
     private fun reload() {
@@ -255,23 +290,7 @@ class DownloadsActivity : AppCompatActivity() {
 
     private fun open(rec: DownloadRecord) {
         val uriStr = rec.savedUri ?: return
-        // 网页给的 MIME 经常是 octet-stream；.apk 必须换成安装器认的类型，
-        // 否则电视上的 packageinstaller 根本不在候选里（用户看到「没有应用能打开」）。
-        val mime = DownloadNaming.resolveMime(rec.displayName.ifBlank { rec.name }, rec.mime)
-        val intent = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(Uri.parse(uriStr), mime)
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        }
-        try {
-            startActivity(intent)
-        } catch (e: Exception) {
-            Toast.makeText(
-                this,
-                if (mime == DownloadNaming.APK_MIME) "没有找到安装程序，无法安装这个文件"
-                else "没有应用能打开这种文件",
-                Toast.LENGTH_SHORT
-            ).show()
-        }
+        DownloadUi.openFile(this, uriStr, rec.displayName.ifBlank { rec.name }, rec.mime)
     }
 
     private fun retry(rec: DownloadRecord) {

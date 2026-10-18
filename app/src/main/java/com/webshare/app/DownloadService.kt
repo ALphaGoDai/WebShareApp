@@ -118,6 +118,14 @@ class DownloadService : Service() {
                     if (r.total <= 0 && lastTotal > 0) r.total = lastTotal
                 }
                 notifyDone(name, savedUri, mime, repairNote)
+                // 前台页面收到后弹「立即打开」（只留 3 秒）；没有页面在前台就只留通知
+                sendBroadcast(
+                    Intent(ACTION_DONE)
+                        .setPackage(packageName)
+                        .putExtra(EXTRA_SAVED_URI, savedUri.toString())
+                        .putExtra(EXTRA_SAVED_NAME, info.first?.takeIf { it.isNotBlank() } ?: name)
+                        .putExtra(EXTRA_MIME, mime)
+                )
             } else {
                 history.update(record.id) { r ->
                     r.status = DownloadRecord.STATUS_FAILED
@@ -502,11 +510,14 @@ class DownloadService : Service() {
         fun nextId(): Long = idSeq.incrementAndGet()
 
         const val ACTION_DOWNLOAD = "com.webshare.app.action.DOWNLOAD"
+        const val ACTION_DONE = "com.webshare.app.action.DOWNLOAD_DONE"
         const val EXTRA_URL = "url"
         const val EXTRA_NAME = "name"
         const val EXTRA_MIME = "mime"
         const val EXTRA_TREE = "tree"
         const val EXTRA_REFERER = "referer"
+        const val EXTRA_SAVED_URI = "saved_uri"
+        const val EXTRA_SAVED_NAME = "saved_name"
 
         fun start(
             context: Context,

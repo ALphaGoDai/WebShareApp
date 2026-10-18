@@ -1,14 +1,25 @@
 package com.webshare.app
 
 import android.app.Activity
+import android.content.Intent
+import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.ColorDrawable
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
+import android.util.Log
+import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
 import android.webkit.MimeTypeMap
 import android.widget.LinearLayout
+import android.widget.PopupWindow
 import android.widget.RadioButton
 import android.widget.RadioGroup
 import android.widget.TextView
+import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
+import androidx.core.content.ContextCompat
 
 /** 从 Content-Disposition / URL 里推断保存用的文件名 */
 object DownloadNaming {
@@ -161,5 +172,89 @@ object DownloadUi {
             }
         }
         dialog.show()
+    }
+
+    /** 打开已下载的文件（下载完成的浮按钮和「已下载」列表共用） */
+    fun openFile(activity: Activity, uriStr: String, name: String?, mime: String?) {
+        val resolved = DownloadNaming.resolveMime(name, mime)
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(Uri.parse(uriStr), resolved)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        try {
+            activity.startActivity(intent)
+        } catch (e: Exception) {
+            Toast.makeText(
+                activity,
+                if (resolved == DownloadNaming.APK_MIME) "没有找到安装程序，无法安装这个文件"
+                else "没有应用能打开这种文件",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+    }
+}
+
+/** 下载完成后浮在底栏上方的「立即打开」按钮，3 秒后自动消失 */
+object DownloadOpenFab {
+
+    private var popup: PopupWindow? = null
+    private var anchor: View? = null
+    private val hide = Runnable { dismiss() }
+
+    fun show(activity: Activity, uriStr: String, name: String?, mime: String?) {
+        if (activity.isFinishing || activity.isDestroyed) return
+        dismiss()
+        val density = activity.resources.displayMetrics.density
+        val label = TextView(activity).apply {
+            text = "立即打开"
+            setTextColor(Color.WHITE)
+            textSize = if (TvMode.isTv(activity)) 16f else 15f
+            setTypeface(typeface, Typeface.BOLD)
+            gravity = Gravity.CENTER
+            setPadding((20 * density).toInt(), (11 * density).toInt(),
+                (20 * density).toInt(), (11 * density).toInt())
+            background = GradientDrawable().apply {
+                setColor(ContextCompat.getColor(activity, R.color.purple_500))
+                cornerRadius = 24 * density
+            }
+            isClickable = true
+            setOnClickListener {
+                dismiss()
+                DownloadUi.openFile(activity, uriStr, name, mime)
+            }
+        }
+        val p = PopupWindow(
+            label,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            false
+        ).apply {
+            isOutsideTouchable = false
+            isFocusable = false
+            elevation = 16 * density
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        }
+        popup = p
+        val root = activity.window?.decorView ?: run {
+            dismiss()
+            return
+        }
+        anchor = root
+        val y = ((if (TvMode.isTv(activity)) 40 else 56) + 14) * density
+        try {
+            p.showAtLocation(root, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL, 0, y.toInt())
+        } catch (e: Exception) {
+            Log.w("WebShareApp", "download open fab failed: ${e.message}")
+            dismiss()
+            return
+        }
+        root.postDelayed(hide, 3000)
+    }
+
+    fun dismiss() {
+        anchor?.removeCallbacks(hide)
+        anchor = null
+        runCatching { popup?.dismiss() }
+        popup = null
     }
 }
