@@ -383,10 +383,10 @@ class MainActivity : AppCompatActivity() {
         val bar = findViewById<View>(R.id.bottomBar)
         bar.layoutParams = bar.layoutParams.apply { height = dp(64) }
 
-        // 底栏：左右翻页箭头、三条线按钮，以及它弹出的三个菜单项，遥控器都要能选中
+        // 底栏：左右翻页箭头、三条线按钮，以及它弹出的四个菜单项，遥控器都要能选中
         val navIds = intArrayOf(
             R.id.tabScrollLeft, R.id.tabScrollRight, R.id.menuButton,
-            R.id.menuRefresh, R.id.menuDownloads, R.id.menuSettings
+            R.id.menuNewTab, R.id.menuRefresh, R.id.menuDownloads, R.id.menuSettings
         )
         for (id in navIds) {
             val item = findViewById<View>(id)
@@ -395,7 +395,9 @@ class MainActivity : AppCompatActivity() {
         }
         // 菜单面板在电视上离底栏（64dp）再高一点，别贴着标签条
         (navMenu.layoutParams as? ViewGroup.MarginLayoutParams)?.bottomMargin = dp(76)
-        for (id in intArrayOf(R.id.menuRefresh, R.id.menuDownloads, R.id.menuSettings)) {
+        for (id in intArrayOf(
+            R.id.menuNewTab, R.id.menuRefresh, R.id.menuDownloads, R.id.menuSettings
+        )) {
             setMenuItemTextSize(findViewById<View>(id))
         }
         (menuButton as? ViewGroup)?.let { group ->
@@ -473,16 +475,19 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun bindMenuFocusChain() {
+        val newTab = findViewById<View>(R.id.menuNewTab)
         val refresh = findViewById<View>(R.id.menuRefresh)
         val downloads = findViewById<View>(R.id.menuDownloads)
         val settings = findViewById<View>(R.id.menuSettings)
-        refresh.nextFocusUpId = R.id.menuButton
+        newTab.nextFocusUpId = R.id.menuButton
+        newTab.nextFocusDownId = R.id.menuRefresh
+        refresh.nextFocusUpId = R.id.menuNewTab
         refresh.nextFocusDownId = R.id.menuDownloads
         downloads.nextFocusUpId = R.id.menuRefresh
         downloads.nextFocusDownId = R.id.menuSettings
         settings.nextFocusUpId = R.id.menuDownloads
         settings.nextFocusDownId = R.id.menuButton
-        for (v in arrayOf(refresh, downloads, settings)) {
+        for (v in arrayOf(newTab, refresh, downloads, settings)) {
             v.nextFocusLeftId = v.id
             v.nextFocusRightId = v.id
         }
@@ -494,7 +499,7 @@ class MainActivity : AppCompatActivity() {
         if (wvId == View.NO_ID) return
         for (id in intArrayOf(
             R.id.tabScrollLeft, R.id.tabScrollRight, R.id.menuButton,
-            R.id.menuRefresh, R.id.menuDownloads, R.id.menuSettings,
+            R.id.menuNewTab, R.id.menuRefresh, R.id.menuDownloads, R.id.menuSettings,
             R.id.openAppGo
         )) {
             findViewById<View>(id).nextFocusUpId = wvId
@@ -2073,13 +2078,20 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setupBottomBar() {
-        // 右下角三条线：竖向弹出「刷新 / 已下载 / 设置」
+        // 右下角三条线：竖向弹出「新建页面 / 刷新 / 已下载 / 设置」
         menuButton.setOnClickListener {
             markOwnUi()
             if (navMenu.visibility == View.VISIBLE) hideNavMenu() else showNavMenu()
         }
         // 点菜单外面（遮罩）收起
         navMenuScrim.setOnClickListener { hideNavMenu() }
+
+        // 新建页面：和切换器里的「新建标签页」共用同一个地址栏（带最近访问过的地址）
+        findViewById<View>(R.id.menuNewTab).setOnClickListener {
+            hideNavMenu()
+            markOwnUi()
+            showAddressBar()
+        }
 
         // 标签页多了：左右两侧出现翻页箭头，标签条本身也能横向滑
         tabScroll.setOnScrollChangeListener { _, _, _, _, _ -> updateTabScrollButtons() }
@@ -2137,8 +2149,8 @@ class MainActivity : AppCompatActivity() {
             menuButton.nextFocusUpId = R.id.menuSettings
             menuButton.nextFocusLeftId = R.id.menuButton
             menuButton.nextFocusRightId = R.id.menuButton
-            findViewById<View>(R.id.menuRefresh).post {
-                findViewById<View>(R.id.menuRefresh).requestFocus()
+            findViewById<View>(R.id.menuNewTab).post {
+                findViewById<View>(R.id.menuNewTab).requestFocus()
             }
         }
     }
