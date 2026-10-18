@@ -381,7 +381,10 @@ class MainActivity : AppCompatActivity() {
     /** 电视布局：加高底栏、放大字号、给所有工具按钮加焦点框，并让网页先拿到焦点 */
     private fun setupTvMode() {
         val bar = findViewById<View>(R.id.bottomBar)
-        bar.layoutParams = bar.layoutParams.apply { height = dp(64) }
+        // 电视上底栏压低到 40dp：64dp 时会吃掉电视 WebView 近 1/8 的高度，
+        // 日历这类按 100dvh 铺满一屏的页面，最底下一行图例会正好被切掉。
+        // 圆片 28dp、聚焦放大 1.3 倍（36.4dp）仍装得下。
+        bar.layoutParams = bar.layoutParams.apply { height = dp(40) }
 
         // 底栏：左右翻页箭头、三条线按钮，以及它弹出的四个菜单项，遥控器都要能选中
         val navIds = intArrayOf(
@@ -393,8 +396,8 @@ class MainActivity : AppCompatActivity() {
             item.isFocusable = true
             item.foreground = ContextCompat.getDrawable(this, R.drawable.bg_tv_focus)
         }
-        // 菜单面板在电视上离底栏（64dp）再高一点，别贴着标签条
-        (navMenu.layoutParams as? ViewGroup.MarginLayoutParams)?.bottomMargin = dp(76)
+        // 菜单面板在电视上离底栏（40dp）再高一点，别贴着标签条
+        (navMenu.layoutParams as? ViewGroup.MarginLayoutParams)?.bottomMargin = dp(52)
         for (id in intArrayOf(
             R.id.menuNewTab, R.id.menuRefresh, R.id.menuDownloads, R.id.menuSettings
         )) {
@@ -416,7 +419,7 @@ class MainActivity : AppCompatActivity() {
 
         // 浮条往上挪一点，别被加高后的底栏盖住
         val stack = findViewById<View>(R.id.popupStack)
-        (stack.layoutParams as? ViewGroup.MarginLayoutParams)?.bottomMargin = dp(76)
+        (stack.layoutParams as? ViewGroup.MarginLayoutParams)?.bottomMargin = dp(52)
 
         // 浮条上的按钮也参与焦点：长按 OK / 菜单键切到工具栏后能按到
         for (id in intArrayOf(R.id.openAppGo, R.id.openAppClose)) {
