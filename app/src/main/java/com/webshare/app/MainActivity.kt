@@ -2,12 +2,14 @@ package com.webshare.app
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.Dialog
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Rect
+import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -420,6 +422,29 @@ class MainActivity : AppCompatActivity() {
             isFocusable = true
             foreground = ContextCompat.getDrawable(this@MainActivity, R.drawable.bg_tv_focus)
         }
+        // 切换器左侧的「＋ 新建」：卡片左边留出位置，遥控器从第一列卡片往左能选中
+        findViewById<View>(R.id.switcherNewTab).apply {
+            visibility = View.VISIBLE
+            isFocusable = true
+            isFocusableInTouchMode = true
+            foreground = ContextCompat.getDrawable(this@MainActivity, R.drawable.bg_tv_focus)
+            nextFocusDownId = R.id.switcherMode
+            nextFocusUpId = R.id.switcherNewTab
+            setOnClickListener {
+                markOwnUi()
+                showAddressBar()
+            }
+            setOnKeyListener { _, keyCode, event ->
+                // 从「新建」按右回到刚才选中的卡片（卡片是动态生成的，没法写 nextFocusRightId）
+                if (event.action == KeyEvent.ACTION_DOWN &&
+                    keyCode == KeyEvent.KEYCODE_DPAD_RIGHT
+                ) {
+                    focusSwitcherCard(switcherFocusPosition)
+                    true
+                } else false
+            }
+        }
+        tabGrid.setPadding(dp(88), dp(12), dp(12), dp(12))
 
         tabs.getOrNull(currentIndex)?.let {
             bindTvFocusTargets(it.webView)
@@ -604,6 +629,7 @@ class MainActivity : AppCompatActivity() {
             null
         )
         pageEditing.set(false)
+        setPageFocusRing(wv, true)
     }
 
     /**
@@ -674,6 +700,7 @@ class MainActivity : AppCompatActivity() {
         val wv = tabs.getOrNull(currentIndex)?.webView ?: return
         tvPageActive = false
         tvBackArmedForExit = false
+        setPageFocusRing(wv, !pageEditing.get())
         wv.post {
             if (hasWindowFocus() && !pageEditing.get()) wv.requestFocus()
         }
@@ -1481,6 +1508,8 @@ class MainActivity : AppCompatActivity() {
             val tab = tabs.getOrNull(currentIndex)
             if (tab != null && tab.iface === iface) {
                 pageEditing.set(editing)
+                // 输入法一弹，网页的大紫框会跟着缩小的视口错位；打字期间不画它
+                setPageFocusRing(wv, !editing)
                 // 「上下左右」模式：焦点移到输入框上就直接把电视键盘叫出来，
                 // 不用再按一次 OK（方向键这时归输入框/键盘）
                 if (editing && tvMode && tab.opMode == "dpad" && tvPageActive) {
@@ -1788,6 +1817,7 @@ class MainActivity : AppCompatActivity() {
                 super.onPageStarted(view, url, favicon)
                 // 换页了：上一页的输入框编辑状态作废
                 pageEditing.set(false)
+                if (tvMode && view != null) setPageFocusRing(view, true)
                 // 页面换了一页，上一条"打开 App"的提示就过期
                 hideOpenAppBar()
                 // 换页了：上一页发现的视频不再算这一页的（长按「已下载」只认当前页）
@@ -2012,15 +2042,11 @@ class MainActivity : AppCompatActivity() {
         }
         tabScroll.post { updateTabScrollButtons() }
 
-        // 轻点=普通刷新，长按=强制刷新（清缓存，登录状态保留）
+        // 轻点=普通刷新。清缓存刷新挪到「长按标签卡片 → 刷新页面（长按）」，
+        // 三条线菜单里不再藏一个长按强制刷新（容易误触，也没必要）
         findViewById<View>(R.id.menuRefresh).setOnClickListener {
             hideNavMenu()
             reloadCurrentPage()
-        }
-        findViewById<View>(R.id.menuRefresh).setOnLongClickListener {
-            hideNavMenu()
-            clearCacheAndReload()
-            true
         }
 
         findViewById<View>(R.id.menuDownloads).setOnClickListener {
@@ -2046,27 +2072,6 @@ class MainActivity : AppCompatActivity() {
     private fun reloadCurrentPage() {
         if (currentIndex !in tabs.indices) return
         webView.reload()
-    }
-
-    private fun clearCacheAndReload() {
-        if (currentIndex !in tabs.indices) return
-        val bar = findViewById<View>(R.id.bottomBar)
-        bar.alpha = 0.5f
-        Toast.makeText(this, "正在清除缓存并刷新（登录状态保留）...", Toast.LENGTH_SHORT).show()
-
-        webView.clearCache(true)
-        webView.clearHistory()
-        // 注意：这里不清 Cookie —— Cookie 是各网站的登录状态，不是缓存。
-        // 原来顺手 removeAllCookies 会让用户"强制刷新一下就退出所有网站登录"。
-        // 真要清登录状态去 设置 → 清除所有网站登录状态（Cookie）。
-        flushCookies()
-
-        webView.settings.cacheMode = WebSettings.LOAD_NO_CACHE
-        webView.reload()
-        webView.postDelayed({
-            webView.settings.cacheMode = WebSettings.LOAD_DEFAULT
-            bar.alpha = 1.0f
-        }, 3000)
     }
 
     private fun showNavMenu() {
@@ -2353,6 +2358,7 @@ class MainActivity : AppCompatActivity() {
             tab.pendingUrl = null
         }
         val wv = tab.webView
+        if (tvMode) setPageFocusRing(wv, !pageEditing.get())
         if (wv.parent !== webViewContainer) {
             webViewContainer.removeAllViews()
             webViewContainer.addView(
@@ -2734,6 +2740,209 @@ class MainActivity : AppCompatActivity() {
         focusSwitcherCard(p.coerceAtMost(tabs.lastIndex), 150)
     }
 
+    /** 标签页菜单里「关闭页面」：切换器开着时关完把焦点交给下一张卡片 */
+    private fun closeTabFromSwitcher(index: Int) {
+        if (index !in tabs.indices) return
+        if (tabSwitcher.visibility != View.VISIBLE) {
+            closeTab(index)
+            return
+        }
+        switcherFocusPosition = index
+        val last = tabs.size == 1
+        closeTab(index)
+        if (last) return
+        if (tabSwitcher.visibility == View.VISIBLE) {
+            focusSwitcherCard(index.coerceAtMost(tabs.lastIndex), 150)
+        }
+    }
+
+    /**
+     * 长按标签卡片弹出的菜单（手机、电视都有）：
+     * 刷新（长按＝清缓存刷新）/ 编辑 / 页面操作方式（仅电视）/ 关闭。
+     */
+    private fun showTabActionsMenu(index: Int) {
+        val tab = tabs.getOrNull(index) ?: return
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(6), dp(6), dp(6), dp(6))
+            background = ContextCompat.getDrawable(this@MainActivity, R.drawable.bg_nav_menu)
+        }
+        val name = tab.alias?.takeIf { it.isNotBlank() }
+            ?: tab.title.ifBlank { "新标签页" }
+        panel.addView(TextView(this).apply {
+            text = name
+            textSize = 13f
+            setTextColor(Color.parseColor("#5F6368"))
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            setPadding(dp(14), dp(10), dp(14), dp(6))
+        })
+
+        val dialog = Dialog(this)
+        dialog.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE)
+
+        val refreshRow = addTabMenuRow(panel, "刷新页面", "长按：清缓存并刷新", false) {
+            dialog.dismiss()
+            reloadTabAt(index, force = false)
+        }
+        refreshRow.setOnLongClickListener {
+            dialog.dismiss()
+            reloadTabAt(index, force = true)
+            true
+        }
+        addTabMenuRow(panel, "编辑页面", "备注名 / 页面字", false) {
+            dialog.dismiss()
+            editTabAlias(index)
+        }
+        if (tvMode) {
+            val dpad = tab.opMode == "dpad"
+            addTabMenuRow(
+                panel,
+                "页面操作方式",
+                if (dpad) "当前：方向键（选元素）" else "当前：鼠标（圆点）",
+                false
+            ) {
+                dialog.dismiss()
+                showTabModePicker(index)
+            }
+        }
+        addTabMenuRow(panel, "关闭页面", null, true) {
+            dialog.dismiss()
+            closeTabFromSwitcher(index)
+        }
+
+        dialog.setContentView(panel)
+        // 长按卡片时手指/遥控器还没抬起来。此刻就允许「点外面关闭」，手机上这次长按
+        // 的抬手会被当成外部点按，菜单刚弹出来就自己没了；等抬手过后再打开这个开关。
+        dialog.setCanceledOnTouchOutside(false)
+        dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        dialog.window?.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+        dialog.window?.setDimAmount(0.35f)
+        dialog.show()
+        dialog.window?.decorView?.postDelayed({
+            runCatching { dialog.setCanceledOnTouchOutside(true) }
+        }, 450)
+        dialog.window?.let { win ->
+            win.setGravity(if (tvMode) Gravity.CENTER else Gravity.BOTTOM)
+            val width = if (tvMode) dp(440)
+            else (resources.displayMetrics.widthPixels - dp(24)).coerceAtLeast(dp(240))
+            win.setLayout(width, ViewGroup.LayoutParams.WRAP_CONTENT)
+        }
+        // 电视上直接把焦点放到第一项，遥控器一进来就能上下选
+        if (tvMode) refreshRow.requestFocus()
+    }
+
+    /** 菜单里的一行（标题 + 可选小字）；电视上可聚焦并有焦点框 */
+    private fun addTabMenuRow(
+        panel: LinearLayout,
+        title: String,
+        subtitle: String?,
+        danger: Boolean,
+        onClick: () -> Unit
+    ): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), dp(8), dp(14), dp(8))
+            isClickable = true
+            background = selectableBackground()
+            setOnClickListener { onClick() }
+            if (tvMode) {
+                isFocusable = true
+                isFocusableInTouchMode = true
+                foreground = ContextCompat.getDrawable(this@MainActivity, R.drawable.bg_tv_focus)
+            }
+        }
+        row.addView(TextView(this).apply {
+            text = title
+            textSize = 16f
+            setTextColor(if (danger) Color.parseColor("#D93025") else Color.parseColor("#202124"))
+        })
+        if (!subtitle.isNullOrEmpty()) {
+            row.addView(TextView(this).apply {
+                text = subtitle
+                textSize = 11f
+                setTextColor(Color.parseColor("#5F6368"))
+                setPadding(0, dp(2), 0, 0)
+            })
+        }
+        panel.addView(
+            row,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
+        return row
+    }
+
+    /** 电视：选这一页的操作方式（鼠标圆点 / 方向键） */
+    private fun showTabModePicker(index: Int) {
+        val tab = tabs.getOrNull(index) ?: return
+        val checked = if (tab.opMode == "dpad") 1 else 0
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("页面操作方式")
+            .setSingleChoiceItems(
+                arrayOf("鼠标（圆点）", "方向键（选元素）"),
+                checked
+            ) { d, which ->
+                d.dismiss()
+                tab.opMode = if (which == 1) "dpad" else "cursor"
+                persistTabs()
+                if (index in tabs.indices) tabAdapter.notifyItemChanged(index)
+                if (tabSwitcher.visibility == View.VISIBLE) {
+                    switcherFocusPosition = index
+                    updateSwitcherModeLabel()
+                    focusSwitcherCard(index, 120)
+                }
+                Toast.makeText(
+                    this,
+                    if (which == 1) "这一页：方向键选元素" else "这一页：鼠标圆点",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+            .setNegativeButton("取消", null)
+            .create()
+        dialog.show()
+        if (tvMode) dialog.listView?.post { dialog.listView?.requestFocus() }
+    }
+
+    /** 刷新某一页；force=true 时清缓存 + 清历史（Cookie/登录状态保留） */
+    private fun reloadTabAt(index: Int, force: Boolean) {
+        val tab = tabs.getOrNull(index) ?: return
+        val wv = tab.webView
+        val pending = tab.pendingUrl
+        if (pending != null) {
+            tab.pendingUrl = null
+            if (force) wv.clearCache(true)
+            wv.loadUrl(pending)
+            return
+        }
+        if (!force) {
+            wv.reload()
+            return
+        }
+        wv.clearCache(true)
+        wv.clearHistory()
+        flushCookies()
+        wv.settings.cacheMode = WebSettings.LOAD_NO_CACHE
+        wv.reload()
+        wv.postDelayed({ wv.settings.cacheMode = WebSettings.LOAD_DEFAULT }, 3000)
+        Toast.makeText(this, "已清缓存并刷新（登录状态保留）", Toast.LENGTH_SHORT).show()
+    }
+
+    /** 电视上输入框获得焦点、输入法弹出时，大紫框（网页焦点框）会跟着视口缩放显得错位：
+     *  打字期间先不画它，收键盘/离开输入框再恢复。 */
+    private fun setPageFocusRing(wv: WebView, on: Boolean) {
+        if (!tvMode) return
+        wv.foreground = if (on) {
+            ContextCompat.getDrawable(this, R.drawable.bg_tv_page_focus)
+        } else null
+        // 刚换上的 selector 不知道当前 View 已经有焦点；不刷一次状态，
+        // 输入法收起后这圈紫框要等下次焦点变化才画出来（实测就是"框没了不回来"）。
+        if (on) wv.refreshDrawableState()
+    }
+
     private fun hideTabSwitcher() {
         tabSwitcher.visibility = View.GONE
         if (tvMode) {
@@ -2909,11 +3118,17 @@ class MainActivity : AppCompatActivity() {
             }
             holder.close.setOnClickListener { closeTab(position) }
             holder.itemView.setOnClickListener { switchTo(position) }
-            // 标题栏：点一下和点卡片一样是切换；长按才是起备注名
+            // 长按整张卡片（含标题栏）弹出标签页菜单：关闭 / 编辑 / 操作方式 / 刷新；
+            // 手机上长按标题也能弹这个菜单（原来长按标题直接进「编辑标签页」）
+            holder.itemView.setOnLongClickListener {
+                showTabActionsMenu(position)
+                true
+            }
+            // 标题栏：点一下和点卡片一样是切换；长按弹菜单
             // （挂了长按监听会让这个 View 变成可点击，不补上点击监听的话点标题就没反应了）
             holder.header.setOnClickListener { switchTo(position) }
             holder.header.setOnLongClickListener {
-                editTabAlias(position)
+                showTabActionsMenu(position)
                 true
             }
             if (tvMode) {
@@ -2924,6 +3139,10 @@ class MainActivity : AppCompatActivity() {
                 holder.itemView.isFocusableInTouchMode = true
                 holder.itemView.foreground =
                     ContextCompat.getDrawable(this@MainActivity, R.drawable.bg_tv_card_focus)
+                // 第一列卡片按左去左侧的「＋ 新建」
+                if (position % 2 == 0) {
+                    holder.itemView.nextFocusLeftId = R.id.switcherNewTab
+                }
                 holder.close.isFocusable = true
                 holder.close.isFocusableInTouchMode = true
                 holder.close.foreground =

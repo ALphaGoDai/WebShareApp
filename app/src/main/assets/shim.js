@@ -1299,6 +1299,37 @@
       }, true);
     } catch (e) {}
 
+    // 输入法弹出后网页视口会变矮（adjustResize）。这时焦点元素可能被挤到视口边缘，
+    // 紫色焦点框看起来像"错位"或被裁掉；把元素挪到中间，并强制重画一次 outline
+    // （部分 Android WebView 在视口高度变化后不会重画焦点框）。
+    function dpadReflow() {
+      if (!dpadOn) return;
+      var el = document.activeElement;
+      if (!el || el === document.body || el === document.documentElement) return;
+      if (!el.getBoundingClientRect) return;
+      var vh = window.innerHeight || 0;
+      if (vh <= 0) return;
+      var r = el.getBoundingClientRect();
+      if (r.top >= 8 && r.bottom <= vh - 8) return;
+      try { el.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch (e) {}
+      try {
+        var old = el.style.outline;
+        el.style.outline = 'none';
+        void el.offsetWidth;
+        el.style.outline = old;
+      } catch (e) {}
+    }
+    function dpadReflowSoon() {
+      setTimeout(dpadReflow, 80);
+      setTimeout(dpadReflow, 320);
+    }
+    try {
+      window.addEventListener('resize', dpadReflowSoon);
+      if (window.visualViewport) {
+        window.visualViewport.addEventListener('resize', dpadReflowSoon);
+      }
+    } catch (e) {}
+
     return {
       show: show,
       move: move,

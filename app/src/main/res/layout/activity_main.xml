@@ -206,6 +206,39 @@
             android:padding="12dp"
             android:clipToPadding="false" />
 
+        <!-- 电视专用：卡片左边竖着的「＋ 新建」按钮，遥控器从第一列卡片往左就能选中。
+             高度和第一行卡片一致（item_tab：34dp 标题 + 170dp 缩略图），顶边和卡片对齐
+             （12dp 网格内边距 + 6dp 卡片外边距），这样它不会孤零零地飘在屏幕中间。
+             图标和文字用 LinearLayout 居中成一组——TextView 的 drawableTop 在超高按钮里
+             会把「＋」顶到最上面、文字留在中间，看着像两截。 -->
+        <LinearLayout
+            android:id="@+id/switcherNewTab"
+            android:layout_width="68dp"
+            android:layout_height="204dp"
+            android:layout_gravity="start|top"
+            android:layout_marginStart="10dp"
+            android:layout_marginTop="18dp"
+            android:background="@drawable/bg_nav_menu"
+            android:gravity="center"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <ImageView
+                android:layout_width="28dp"
+                android:layout_height="28dp"
+                android:src="@drawable/ic_nav_add"
+                android:tint="@color/purple_500"
+                android:contentDescription="@null" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="新建"
+                android:textColor="@color/purple_500"
+                android:textSize="13sp" />
+        </LinearLayout>
+
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="52dp"
