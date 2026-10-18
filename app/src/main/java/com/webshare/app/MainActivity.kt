@@ -2634,6 +2634,13 @@ class MainActivity : AppCompatActivity() {
             tabStrip.removeAllViews()
             for (tab in tabs) tabStrip.addView(buildTabChip(tab))
             tabScroll.post {
+                // 关掉当前标签页（尤其是最左边那页）后，addView 自带的那次 requestLayout
+                // 偶尔会被吞掉：圆片留在 0×0、底栏看起来整条空白（v1.0.73 的自愈只在
+                // 回到前台时才触发）。下个消息里再明确请求一次布局，把这一拍补上。
+                if (tabs.isNotEmpty() && (tabStrip.getChildAt(0)?.width ?: 0) <= 0) {
+                    tabStrip.requestLayout()
+                    tabScroll.requestLayout()
+                }
                 tabScroll.scrollTo(keepScroll, 0)
                 updateTabScrollButtons()
             }
