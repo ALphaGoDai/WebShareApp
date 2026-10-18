@@ -70,6 +70,8 @@ class MainActivity : AppCompatActivity() {
 
     /** 标签条内容的签名（首字母/选中项没变就不重建，免得电视上焦点被冲掉） */
     private var tabStripSignature = ""
+    /** 标签条自愈正在重建：避免 onResume/焦点变化/布局回调叠着各重建一次 */
+    private var tabStripRepairPending = false
     /** 上次把哪一页的圆片滚进可视区：只在真的换了页时滚，别把用户手动翻的位置拉回来 */
     private var revealedTabIndex = -1
 
@@ -716,6 +718,9 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         if (!tvMode) return
+        // 电视切走输入源再回来时，底栏偶尔会只剩三条线按钮、标签圆片整条空白：
+        // 这里补一次自愈，孩子数量/尺寸不对就重建（正常时只做一次很轻的检查）。
+        tabScroll.post { ensureTabStripVisible() }
         val wv = tabs.getOrNull(currentIndex)?.webView ?: return
         tvPageActive = false
         tvBackArmedForExit = false
@@ -723,6 +728,44 @@ class MainActivity : AppCompatActivity() {
         wv.post {
             if (hasWindowFocus() && !pageEditing.get()) wv.requestFocus()
         }
+    }
+
+    /**
+     * 标签条自愈。电视从别的输入源/应用回来时，Surface 可能没把底栏的圆片重新画出来；
+     * 只要标签数对不上、或者圆片根本没量出宽高，就强制重建一次。
+     * force = true 用于「重新拿到窗口焦点」这种明确需要重画的时机。
+     */
+    private fun ensureTabStripVisible(force: Boolean = false) {
+        if (tabs.isEmpty() || isFinishing || isDestroyed) return
+        val firstChipWidth = tabStrip.getChildAt(0)?.width ?: 0
+        val broken = tabStrip.childCount != tabs.size ||
+            (tabStrip.childCount > 0 && firstChipWidth <= 0) ||
+            tabStrip.width <= 0 || tabStrip.height <= 0
+        if (!force && !broken) return
+        if (tabStripRepairPending) return
+        tabStripRepairPending = true
+        if (broken) {
+            Log.w(
+                TAG,
+                "tab strip empty/broken: tabs=${tabs.size} children=${tabStrip.childCount} " +
+                    "chipW=$firstChipWidth strip=${tabStrip.width}x${tabStrip.height}，重建"
+            )
+        }
+        tabStripSignature = ""   // 强制 updateTabStrip 走重建分支
+        updateTabStrip()
+        tabStrip.post {
+            tabStripRepairPending = false
+            tabStrip.requestLayout()
+            tabScroll.requestLayout()
+            updateTabScrollButtons()
+        }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (!hasFocus || !tvMode) return
+        // 从 HDMI 输入/别的应用切回来：延迟一点等窗口尺寸稳定，再强制重画标签条
+        tabScroll.postDelayed({ ensureTabStripVisible(force = true) }, 120)
     }
 
     /**
@@ -1923,6 +1966,7 @@ class MainActivity : AppCompatActivity() {
                     tab.title = view?.title?.takeIf { it.isNotBlank() } ?: tab.title
                     tab.url = url ?: tab.url
                     updateTabStrip()   // 底栏圆片取标题首字，换页后跟着变
+                    ensureTabStripVisible()
                     persistTabs()
                 }
                 if (currentSharedText != null) {
