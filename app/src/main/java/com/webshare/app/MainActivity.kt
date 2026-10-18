@@ -90,6 +90,10 @@ class MainActivity : AppCompatActivity() {
     private var centerLongPress: Runnable? = null
     private var centerLongPressed = false
 
+    /** 工具栏上的标签圆片：长按 OK 弹这一页的操作菜单（松手后才弹，避免按键抬起点到菜单第一项） */
+    private var chipLongPress: Runnable? = null
+    private var chipLongPressed = false
+
     /**
      * 电视上「网页」是一个控件：焦点刚落到网页上只是选中它（不显示光标、不响应方向键），
      * 再按一次 OK 才进入页面内的光标模式。手机没有这个状态，始终为 true。
@@ -768,7 +772,13 @@ class MainActivity : AppCompatActivity() {
         }
 
         // 对话框/输入法/别的窗口在前台时不抢键；输入框在编辑时方向键归网页
-        if (!hasWindowFocus() || !wv.hasFocus()) return super.dispatchKeyEvent(event)
+        if (!hasWindowFocus() || !wv.hasFocus()) {
+            // 焦点在工具栏的标签圆片上时，OK 由我们接：短按切页，长按松手后弹操作菜单。
+            // 不能直接用 View 的 onLongClick——菜单会在按键还按着时就抢到焦点，
+            // 松手那一下会把第一项「刷新页面」点掉（真实复现：菜单一闪就没）。
+            if (hasWindowFocus() && handleTabChipKey(event)) return true
+            return super.dispatchKeyEvent(event)
+        }
         if (pageEditing.get()) {
             // 「上下左右」模式：输入框有焦点、但键盘被返回键收起时，OK 负责再把键盘叫出来；
             // 其余按键仍交给网页（键盘开着时由输入法自己处理）
@@ -895,6 +905,45 @@ class MainActivity : AppCompatActivity() {
             }
         }
         return super.dispatchKeyEvent(event)
+    }
+
+    /**
+     * 标签圆片上的 OK：短按＝切换这一页，长按（约 550ms）＝松手后弹出这一页的操作菜单。
+     * 返回 true 表示按键已经被这里处理掉。
+     */
+    private fun handleTabChipKey(event: KeyEvent): Boolean {
+        val key = event.keyCode
+        val isOk = key == KeyEvent.KEYCODE_DPAD_CENTER || key == KeyEvent.KEYCODE_ENTER ||
+            key == KeyEvent.KEYCODE_NUMPAD_ENTER
+        if (!isOk) return false
+        val focused = currentFocus ?: return false
+        if (focused.parent !== tabStrip) return false
+        val index = tabStrip.indexOfChild(focused)
+        if (index < 0) return false
+
+        when (event.action) {
+            KeyEvent.ACTION_DOWN -> {
+                if (event.repeatCount == 0) {
+                    chipLongPressed = false
+                    val runnable = Runnable { chipLongPressed = true }
+                    chipLongPress = runnable
+                    focused.postDelayed(runnable, 550)
+                }
+                return true
+            }
+            KeyEvent.ACTION_UP -> {
+                chipLongPress?.let { focused.removeCallbacks(it) }
+                chipLongPress = null
+                if (chipLongPressed) {
+                    chipLongPressed = false
+                    if (index in tabs.indices) showTabActionsMenu(index)
+                } else {
+                    focused.performClick()
+                }
+                return true
+            }
+        }
+        return true
     }
 
     // ---------- 登录状态（Cookie） ----------
@@ -2573,6 +2622,9 @@ class MainActivity : AppCompatActivity() {
         chip.isSingleLine = true
         chip.isClickable = true
         chip.isFocusable = tvMode
+        // 触摸过的电视/模拟器会停在 touch mode；只设 isFocusable 时 requestFocus 会被忽略，
+        // 长按工具栏标签就不弹菜单（真机/模拟器都复现过）。和切换器按钮一样补这个标志。
+        chip.isFocusableInTouchMode = tvMode
         chip.contentDescription =
             (tab.alias?.takeIf { it.isNotBlank() } ?: tab.title.ifBlank { "新标签页" })
         val lp = LinearLayout.LayoutParams(size, size)
@@ -2604,13 +2656,13 @@ class MainActivity : AppCompatActivity() {
             val index = tabs.indexOf(tab)
             if (index >= 0) switchTo(index)
         }
-        // 标签页管理（切换器/关闭/备注名）挪到长按圆片：底栏只留一个「三条线」
+        // 长按标签圆片：直接弹这一页的操作菜单（刷新/编辑/操作方式/关闭）。
+        // 标签页切换器改从菜单里的「标签页列表」进，不再让长按先进切换器。
         chip.setOnLongClickListener {
             markOwnUi()
             userTouchedSinceStart = true
             val index = tabs.indexOf(tab)
-            if (index >= 0) switchTo(index)
-            openTabSwitcher()
+            if (index >= 0) showTabActionsMenu(index)
             true
         }
         if (tvMode) {
@@ -2759,8 +2811,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 长按标签卡片弹出的菜单（手机、电视都有）：
-     * 刷新（长按＝清缓存刷新）/ 编辑 / 页面操作方式（仅电视）/ 关闭。
+     * 长按标签圆片（底栏）或切换器卡片弹出的菜单（手机、电视都有）：
+     * 刷新（长按＝清缓存刷新）/ 编辑 / 标签页列表（仅底栏入口）/ 页面操作方式（仅电视）/ 关闭。
      */
     private fun showTabActionsMenu(index: Int) {
         val tab = tabs.getOrNull(index) ?: return
@@ -2795,6 +2847,14 @@ class MainActivity : AppCompatActivity() {
         addTabMenuRow(panel, "编辑页面", "备注名 / 页面字", false) {
             dialog.dismiss()
             editTabAlias(index)
+        }
+        // 长按圆片已经不再进切换器，这里保留入口；从切换器卡片长按打开的菜单里
+        // 切换器本来就开着，就不用再显示这一项了。
+        if (tabSwitcher.visibility != View.VISIBLE) {
+            addTabMenuRow(panel, "标签页列表", "打开标签页切换器", false) {
+                dialog.dismiss()
+                openTabSwitcher()
+            }
         }
         if (tvMode) {
             val dpad = tab.opMode == "dpad"
