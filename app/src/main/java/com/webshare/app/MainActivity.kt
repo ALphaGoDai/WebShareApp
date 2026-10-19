@@ -108,6 +108,21 @@ class MainActivity : AppCompatActivity() {
     private var chipLongPressed = false
 
     /**
+     * 这一次实体 OK 按下已经被长按消费掉了（页面里长按 → 焦点交给工具栏）。
+     * 焦点虽然换了，但手指还按着同一颗键：后续的重复 DOWN 和最后的 UP 不能再被
+     * 新焦点当成点击/长按，否则刚切到工具栏就被标签圆片的「点击」切回网页，
+     * 在「网页选中」和「光标模式」之间来回循环。只有上一次已经抬起的新的 ACTION_DOWN 才清零。
+     */
+    private var okLongPressConsumed = false
+
+    /**
+     * 遥控器 OK 键当前是否还按着。焦点被长按挪走后，个别机型会把同一次按下的 DOWN
+     * 再发给新焦点（repeatCount 还是 0）；靠这个标记认出「这不是新的一次按下」，
+     * 不能拿它清掉 [okLongPressConsumed]。
+     */
+    private var okKeyDown = false
+
+    /**
      * 电视上「网页」是一个控件：焦点刚落到网页上只是选中它（不显示光标、不响应方向键），
      * 再按一次 OK 才进入页面内的光标模式。手机没有这个状态，始终为 true。
      */
@@ -815,6 +830,11 @@ class MainActivity : AppCompatActivity() {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
+        if (!hasFocus) {
+            // 窗口被别的窗口/输入法拿走，按键状态不能再信（否则 OK 的闩会卡住）
+            okKeyDown = false
+            okLongPressConsumed = false
+        }
         if (!hasFocus || !tvMode) return
         // 从 HDMI 输入/别的应用切回来：延迟一点等窗口尺寸稳定，再强制重画标签条
         tabScroll.postDelayed({ ensureTabStripVisible(force = true) }, 120)
@@ -833,6 +853,35 @@ class MainActivity : AppCompatActivity() {
         if (!tvMode) return super.dispatchKeyEvent(event)
         // 网页全屏时把按键全交给全屏视图（视频控件自己会处理方向键/OK）
         if (customView != null) return super.dispatchKeyEvent(event)
+        val key = event.keyCode
+        val isOkKey = key == KeyEvent.KEYCODE_DPAD_CENTER || key == KeyEvent.KEYCODE_ENTER ||
+            key == KeyEvent.KEYCODE_NUMPAD_ENTER
+        if (isOkKey) {
+            if (event.action == KeyEvent.ACTION_DOWN) {
+                // 真正新的一次按下（上一次已经抬起来）才清账；同一次按住期间
+                // 系统重发/重复的 DOWN 都算在上一次长按里
+                if (event.repeatCount == 0 && !okKeyDown) okLongPressConsumed = false
+                okKeyDown = true
+            } else if (event.action == KeyEvent.ACTION_UP) {
+                okKeyDown = false
+            }
+            if (okLongPressConsumed) {
+                // 长按已经归了页面，焦点也被挪到工具栏：同一次按下的重复事件和松手
+                // 不再交给任何控件（否则圆片/菜单按钮会把松手当成一次点击）
+                if (event.action == KeyEvent.ACTION_UP) {
+                    centerLongPress?.let {
+                        tabs.getOrNull(currentIndex)?.webView?.removeCallbacks(it)
+                    }
+                    centerLongPress = null
+                    centerLongPressed = false
+                    chipLongPress?.let { (currentFocus ?: tabStrip).removeCallbacks(it) }
+                    chipLongPress = null
+                    chipLongPressed = false
+                    okLongPressConsumed = false
+                }
+                return true
+            }
+        }
         // 标签页切换器是整屏浮层：按键归浮层。焦点没进去（或落到不画焦点框的网格上）时
         // 先塞回当前卡片，否则下面的网页逻辑会把方向键吃掉（旧版遥控器根本走不进卡片）。
         if (tabSwitcher.visibility == View.VISIBLE) {
@@ -843,7 +892,6 @@ class MainActivity : AppCompatActivity() {
             }
             return super.dispatchKeyEvent(event)
         }
-        val key = event.keyCode
 
         if (key == KeyEvent.KEYCODE_MENU || key == KeyEvent.KEYCODE_INFO) {
             if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
@@ -921,6 +969,8 @@ class MainActivity : AppCompatActivity() {
                 KeyEvent.KEYCODE_NUMPAD_ENTER -> {
                     if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
                         activateTvPage()
+                        // 进入页面的这一下 OK 已经用掉了，松手不能再点在网页/别的控件上
+                        okLongPressConsumed = true
                     }
                     return true
                 }
@@ -943,6 +993,7 @@ class MainActivity : AppCompatActivity() {
                                 centerLongPressed = false
                                 val runnable = Runnable {
                                     centerLongPressed = true
+                                    okLongPressConsumed = true
                                     focusNativeControls()
                                 }
                                 centerLongPress = runnable
@@ -994,6 +1045,7 @@ class MainActivity : AppCompatActivity() {
                             centerLongPressed = false
                             val runnable = Runnable {
                                 centerLongPressed = true
+                                okLongPressConsumed = true
                                 focusNativeControls()
                             }
                             centerLongPress = runnable
