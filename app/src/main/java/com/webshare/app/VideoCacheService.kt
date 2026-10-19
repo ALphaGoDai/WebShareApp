@@ -12,9 +12,56 @@ import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import java.util.Collections
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
+
+/**
+ * 缓存任务的实时状态：「已下载 → 缓存视频」页轮询这里，排队/正在下载/失败的条目也能
+ * 和已完成的缓存排在同一张列表里显示进度。只活在进程内（服务被杀就跟着没了）。
+ */
+object VideoCacheProgress {
+
+    const val STATE_QUEUED = 0
+    const val STATE_RUNNING = 1
+    const val STATE_FAILED = 2
+
+    data class Task(
+        val id: Long,
+        val title: String,
+        val pageUrl: String,
+        val kind: String,
+        val startedAt: Long,
+        val state: Int = STATE_QUEUED,
+        val bytes: Long = 0,
+        val total: Long = -1,
+        val percent: Int = -1,
+        val note: String = "",
+        val error: String = ""
+    )
+
+    private val lock = Any()
+    private val tasks = LinkedHashMap<Long, Task>()
+
+    fun put(task: Task) {
+        synchronized(lock) { tasks[task.id] = task }
+    }
+
+    fun update(id: Long, block: (Task) -> Task) {
+        synchronized(lock) {
+            tasks[id]?.let { tasks[id] = block(it) }
+        }
+    }
+
+    fun remove(id: Long) {
+        synchronized(lock) { tasks.remove(id) }
+    }
+
+    fun snapshot(): List<Task> = synchronized(lock) { tasks.values.toList() }
+}
 
 /**
  * 「缓存视频」的前台服务：一次跑一个（串行），进度发在通知栏（渠道「视频缓存」），
@@ -25,10 +72,15 @@ class VideoCacheService : Service() {
     private val queue = ConcurrentLinkedQueue<CacheRequest>()
     private val worker = Executors.newSingleThreadExecutor()
     private val pending = AtomicInteger(0)
+    private val nextId = AtomicLong(System.currentTimeMillis())
+    private val canceledIds = Collections.newSetFromMap(ConcurrentHashMap<Long, Boolean>())
     private val bannerId = 2
 
     @Volatile
     private var active: VideoCacher? = null
+
+    @Volatile
+    private var activeTaskId = 0L
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -45,12 +97,24 @@ class VideoCacheService : Service() {
                     stopSelfIfIdle()
                     return START_NOT_STICKY
                 }
+                val id = nextId.updateAndGet { maxOf(it + 1, System.currentTimeMillis()) }
                 val req = CacheRequest(
                     url = url,
                     kind = intent.getStringExtra(EXTRA_KIND) ?: MediaWatch.KIND_FILE,
                     mime = intent.getStringExtra(EXTRA_MIME) ?: "",
                     pageUrl = intent.getStringExtra(EXTRA_REFERER) ?: "",
-                    title = intent.getStringExtra(EXTRA_TITLE) ?: "视频"
+                    title = intent.getStringExtra(EXTRA_TITLE) ?: "视频",
+                    id = id,
+                    referer = intent.getStringExtra(EXTRA_PLAYER_REFERER) ?: ""
+                )
+                VideoCacheProgress.put(
+                    VideoCacheProgress.Task(
+                        id = id,
+                        title = req.title,
+                        pageUrl = req.pageUrl,
+                        kind = req.kind,
+                        startedAt = System.currentTimeMillis()
+                    )
                 )
                 queue.add(req)
                 pending.incrementAndGet()
@@ -58,8 +122,22 @@ class VideoCacheService : Service() {
                 worker.execute { drain() }
             }
             ACTION_CANCEL -> {
-                active?.cancel()
-                Log.i(TAG, "用户取消了缓存")
+                val id = intent.getLongExtra(EXTRA_ID, 0L)
+                if (id > 0) {
+                    canceledIds.add(id)
+                    if (activeTaskId == id) {
+                        active?.cancel()
+                    } else if (queue.removeIf { it.id == id }) {
+                        pending.decrementAndGet()
+                        stopSelfIfIdle()
+                    }
+                    VideoCacheProgress.remove(id)
+                    Log.i(TAG, "用户取消了缓存：$id")
+                } else {
+                    active?.cancel()
+                    Log.i(TAG, "用户取消了缓存")
+                }
+                stopSelfIfIdle()
             }
             else -> stopSelfIfIdle()
         }
@@ -70,7 +148,7 @@ class VideoCacheService : Service() {
     private fun drain() {
         while (true) {
             val req = queue.poll() ?: break
-            runOne(req)
+            if (!canceledIds.remove(req.id)) runOne(req)
             pending.decrementAndGet()
         }
         stopSelfIfIdle()
@@ -79,26 +157,56 @@ class VideoCacheService : Service() {
     private fun runOne(req: CacheRequest) {
         val cacher = VideoCacher(this, req)
         active = cacher
+        activeTaskId = req.id
+        VideoCacheProgress.update(req.id) { it.copy(state = VideoCacheProgress.STATE_RUNNING) }
         var lastPercent = -1
+        var lastBytes = 0L
+        var lastTotal = -1L
         cacher.run(object : VideoCacher.Listener {
             override fun onProgress(bytes: Long, totalBytes: Long, note: String) {
+                lastBytes = bytes
+                lastTotal = totalBytes
                 val pct = if (totalBytes > 0) ((bytes * 100) / totalBytes).toInt() else -1
+                VideoCacheProgress.update(req.id) {
+                    it.copy(bytes = bytes, total = totalBytes, percent = pct, note = note)
+                }
                 if (pct == lastPercent && note.isEmpty()) return
                 lastPercent = pct
                 notifyProgress(req.title, bytes, totalBytes, note)
             }
 
+            override fun onSegmentProgress(current: Int, total: Int, bytes: Long) {
+                val pct = if (total > 0) current * 100 / total else -1
+                val note = "第 $current/$total 段"
+                lastBytes = bytes
+                lastTotal = -1
+                VideoCacheProgress.update(req.id) {
+                    it.copy(bytes = bytes, total = -1, percent = pct, note = note)
+                }
+                notifyProgress(req.title, bytes, -1, note)
+            }
+
+            override fun onNote(note: String) {
+                VideoCacheProgress.update(req.id) { it.copy(note = note) }
+                notifyProgress(req.title, lastBytes, lastTotal, note)
+            }
+
             override fun onDone(entry: VideoCacheStore.Entry) {
                 Log.i(TAG, "缓存完成：${entry.fileName} ${DownloadService.fmtSize(entry.size)}")
+                VideoCacheProgress.remove(req.id)
                 notifyDone(entry)
             }
 
             override fun onError(message: String) {
                 Log.w(TAG, "缓存失败：$message")
+                VideoCacheProgress.update(req.id) {
+                    it.copy(state = VideoCacheProgress.STATE_FAILED, error = message, note = "")
+                }
                 notifyFailed(req.title, message)
             }
         })
         active = null
+        activeTaskId = 0L
     }
 
     private fun stopSelfIfIdle() {
@@ -223,6 +331,8 @@ class VideoCacheService : Service() {
         const val EXTRA_MIME = "mime"
         const val EXTRA_TITLE = "title"
         const val EXTRA_REFERER = "referer"
+        const val EXTRA_PLAYER_REFERER = "player_referer"
+        const val EXTRA_ID = "task_id"
 
         fun start(context: Context, item: MediaWatch.Item, title: String) {
             val intent = Intent(context, VideoCacheService::class.java).apply {
@@ -232,11 +342,30 @@ class VideoCacheService : Service() {
                 putExtra(EXTRA_MIME, item.mime)
                 putExtra(EXTRA_TITLE, title)
                 putExtra(EXTRA_REFERER, item.pageUrl)
+                putExtra(EXTRA_PLAYER_REFERER, item.referer)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
             } else {
                 context.startService(intent)
+            }
+        }
+
+        /** 取消一条排队中/正在跑的任务（缓存页的「取消」按钮） */
+        fun cancel(context: Context, id: Long) {
+            val intent = Intent(context, VideoCacheService::class.java).apply {
+                action = ACTION_CANCEL
+                putExtra(EXTRA_ID, id)
+            }
+            try {
+                context.startService(intent)
+            } catch (e: Exception) {
+                try {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        context.startForegroundService(intent)
+                    }
+                } catch (_: Exception) {
+                }
             }
         }
     }

@@ -152,7 +152,11 @@ open class DohWebViewClient(
         // 放在这儿是因为只有走我们自己的通道时才能看到 Content-Type。
         if (result != null && !request.isForMainFrame) {
             try {
-                MediaWatch.observeByMime(view, urlStr, result.mimeType)
+                MediaWatch.observeByMime(
+                    view, urlStr, result.mimeType,
+                    request.requestHeaders?.entries
+                        ?.firstOrNull { it.key.equals("Referer", true) }?.value ?: ""
+                )
             } catch (e: Exception) {
                 Log.w(TAG, "MediaWatch.observeByMime failed: ${e.message}")
             }

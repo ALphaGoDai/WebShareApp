@@ -19,7 +19,11 @@ class CacheRequest(
     val kind: String,
     val mime: String,
     val pageUrl: String,
-    val title: String
+    val title: String,
+    /** 任务 id：缓存列表用它显示进度，也拿它当缓存条目的 id */
+    val id: Long = System.currentTimeMillis(),
+    /** 播放器页地址（CDN 可能只认它当 Referer，比如西瓜卡通的 pframe） */
+    val referer: String = ""
 )
 
 /**
@@ -160,6 +164,15 @@ class VideoCacher(
     interface Listener {
         /** note 是"第 3/12 段"这类细话；totalBytes<0 表示总长未知 */
         fun onProgress(bytes: Long, totalBytes: Long, note: String)
+
+        /** HLS 的分段进度：按"第几段"算百分比，bytes 是目前累计的字节数 */
+        fun onSegmentProgress(current: Int, total: Int, bytes: Long) {
+            onProgress(bytes, -1, "第 $current/$total 段")
+        }
+
+        /** 只更新一句状态（限速重试等），别把已经下到的字节数冲掉 */
+        fun onNote(note: String) {}
+
         fun onDone(entry: VideoCacheStore.Entry)
         fun onError(message: String)
     }
@@ -175,7 +188,7 @@ class VideoCacher(
 
     /** 在后台线程跑（阻塞），结果通过 listener 回调 */
     fun run(listener: Listener) {
-        val id = System.currentTimeMillis()
+        val id = req.id
         val outDir = VideoCacheStore.dir(ctx)
         val base = sanitize(req.title.ifBlank { "视频" })
         var outFile = File(outDir, "$id-$base.mp4")
@@ -224,7 +237,7 @@ class VideoCacher(
             }
 
             if (cancelled) {
-                outFile.delete()
+                deletePartial(outFile)
                 return
             }
             if (!outFile.exists() || outFile.length() <= 0) {
@@ -245,15 +258,27 @@ class VideoCacher(
             listener.onDone(entry)
             if (note.isNotEmpty()) Log.i(TAG, note)
         } catch (e: Exception) {
-            if (cancelled) return
-            Log.w(TAG, "缓存失败: ${e.message}")
-            try {
-                if (outFile.exists()) outFile.delete()
-            } catch (ex: Exception) {
+            if (cancelled) {
+                deletePartial(outFile)
+                return
             }
+            Log.w(TAG, "缓存失败: ${e.message}")
+            deletePartial(outFile)
             listener.onError(e.message ?: "缓存失败")
         } finally {
             engine = null
+        }
+    }
+
+    /** 取消/失败时把写了一半的临时文件（直链 .mp4 或 HLS 的 .ts/.mp4）一起清掉 */
+    private fun deletePartial(outFile: File) {
+        val base = outFile.nameWithoutExtension
+        val parent = outFile.parentFile
+        for (f in listOf(outFile, File(parent, "$base.ts"), File(parent, "$base.mp4"))) {
+            try {
+                if (f.exists()) f.delete()
+            } catch (e: Exception) {
+            }
         }
     }
 
@@ -261,7 +286,7 @@ class VideoCacher(
 
     private fun downloadDirect(outFile: File, listener: Listener) {
         val headers = baseHeaders()
-        engine!!.open(req.url, headers).use { resp ->
+        openWithRetry(req.url, headers, listener, "视频").use { resp ->
             if (resp.status !in 200..299) throw IllegalStateException("服务器返回 HTTP ${resp.status}")
             val total = resp.contentLength
             checkSpace(total)
@@ -276,14 +301,14 @@ class VideoCacher(
     /** 返回（成品文件，附注）；附注是"TS 转成了 mp4"之类的说明 */
     private fun fetchHls(outFile: File, listener: Listener): Pair<File, String> {
         var playlistUrl = req.url
-        var text = fetchText(playlistUrl)
+        var text = fetchText(playlistUrl, listener)
         // 多码率（master）播放列表：挑码率最高的那个
         if (text.contains("#EXT-X-STREAM-INF")) {
             val best = parseMaster(text, playlistUrl)
                 ?: throw IllegalStateException("播放列表里没有可用的清晰度")
             Log.i(TAG, "HLS 选流：${best.second} bps -> ${best.first}")
             playlistUrl = best.first
-            text = fetchText(playlistUrl)
+            text = fetchText(playlistUrl, listener)
         }
         if (text.contains("#EXT-X-KEY")) {
             val enc = Regex("#EXT-X-KEY:[^\\n]*METHOD=([A-Z0-9-]+)").find(text)?.groupValues?.get(1)
@@ -304,13 +329,16 @@ class VideoCacher(
         val isFmp4 = initUrl != null
         val raw = File(outFile.parentFile, outFile.nameWithoutExtension + if (isFmp4) ".mp4" else ".ts")
         FileOutputStream(raw).use { out ->
+            var written = 0L
             if (initUrl != null) {
-                fetchTo(out, initUrl, -1, listener, "初始化段")
+                written += fetchTo(out, initUrl, -1, listener, "初始化段")
             }
             segments.forEachIndexed { i, url ->
                 if (cancelled) return@use
                 val note = "第 ${i + 1}/${segments.size} 段"
-                fetchTo(out, url, -1, listener, note)
+                written += fetchTo(out, url, -1, listener, note)
+                // 分片数量是已知的，按"第几段"给进度条，比字节数直观
+                listener.onSegmentProgress(i + 1, segments.size, written)
             }
         }
         if (isFmp4) return raw to "fMP4 分片，直接拼成 mp4"
@@ -353,17 +381,30 @@ class VideoCacher(
         return out
     }
 
-    private fun fetchText(url: String): String {
-        engine!!.open(url, baseHeaders() + ("Accept" to "*/*")).use { resp ->
+    private fun fetchText(url: String, listener: Listener): String {
+        openWithRetry(url, baseHeaders() + ("Accept" to "*/*"), listener, "播放列表").use { resp ->
             if (resp.status !in 200..299) throw IllegalStateException("播放列表返回 HTTP ${resp.status}（$url）")
             return resp.input.readBytes().toString(Charsets.UTF_8)
         }
     }
 
-    private fun fetchTo(out: java.io.OutputStream, url: String, total: Long, listener: Listener, note: String) {
-        engine!!.open(url, baseHeaders()).use { resp ->
+    /** 下载一个分片，返回写进去的字节数 */
+    private fun fetchTo(
+        out: java.io.OutputStream,
+        url: String,
+        total: Long,
+        listener: Listener,
+        note: String
+    ): Long {
+        openWithRetry(url, baseHeaders(), listener, "分片").use { resp ->
             if (resp.status !in 200..299) throw IllegalStateException("分片返回 HTTP ${resp.status}")
-            copyStream(resp.input, out, if (resp.contentLength > 0) resp.contentLength else total, listener, note)
+            return copyStream(
+                resp.input, out,
+                if (resp.contentLength > 0) resp.contentLength else total,
+                listener, note,
+                // 分片内部不报字节进度：进度条按"第几段"走，字节数用累计值
+                notify = false
+            )
         }
     }
 
@@ -372,7 +413,9 @@ class VideoCacher(
     private fun baseHeaders(): Map<String, String> {
         val h = mutableMapOf<String, String>()
         h["Accept"] = "*/*"
-        if (req.pageUrl.isNotEmpty()) h["Referer"] = req.pageUrl
+        // 优先用发现视频的那次请求自己的 Referer（西瓜卡通的 CDN 认 pframe 这个播放器页）
+        val referer = req.referer.ifBlank { req.pageUrl }
+        if (referer.isNotEmpty()) h["Referer"] = referer
         try {
             h["User-Agent"] = android.webkit.WebSettings.getDefaultUserAgent(ctx)
         } catch (e: Exception) {
@@ -380,13 +423,74 @@ class VideoCacher(
         return h
     }
 
+    /**
+     * 发请求；429 / 5xx 按住 Retry-After 等一会儿再试。
+     *
+     * 西瓜卡通的 CDN 会在一小串分片之后回 429 + `Retry-After: 24`，播放器自己就有重试，
+     * 缓存器以前是拿到 429 直接判失败（用户看到的就是"这个站下不了"）。
+     */
+    private fun openWithRetry(
+        url: String,
+        headers: Map<String, String>,
+        listener: Listener,
+        what: String
+    ): HttpEngine.StreamedResponse {
+        var attempt = 0
+        while (true) {
+            if (cancelled) throw IllegalStateException("已取消")
+            val resp = engine!!.open(url, headers)
+            if (resp.status in 200..299) return resp
+
+            val status = resp.status
+            val retryable = status == 429 || status in 500..599
+            if (!retryable || attempt >= MAX_RETRIES) {
+                resp.close()
+                throw IllegalStateException(
+                    if (status == 429) "服务器限速（HTTP 429），重试 $MAX_RETRIES 次仍失败"
+                    else "$what 返回 HTTP $status"
+                )
+            }
+
+            val waitMs = (retryAfterMs(resp.header("Retry-After")) ?: (1500L shl attempt))
+                .coerceIn(1200L, 30_000L)
+            resp.close()
+            attempt++
+            val seconds = (waitMs + 999) / 1000
+            val reason = if (status == 429) "服务器限速" else "服务器返回 HTTP $status"
+            listener.onNote("$reason，等待 $seconds 秒后重试（$attempt/$MAX_RETRIES）")
+
+            var slept = 0L
+            while (slept < waitMs) {
+                if (cancelled) throw IllegalStateException("已取消")
+                val step = minOf(250L, waitMs - slept)
+                Thread.sleep(step)
+                slept += step
+            }
+        }
+    }
+
+    /** Retry-After 可能是秒数，也可能是 HTTP 日期 */
+    private fun retryAfterMs(value: String?): Long? {
+        val v = value?.trim().orEmpty()
+        if (v.isEmpty()) return null
+        v.toLongOrNull()?.let { return (it * 1000).coerceAtLeast(0) }
+        return try {
+            val fmt = java.text.SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss z", Locale.US)
+            val at = fmt.parse(v)?.time ?: return null
+            (at - System.currentTimeMillis()).coerceAtLeast(0)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     private fun copyStream(
         input: java.io.InputStream,
         output: java.io.OutputStream,
         total: Long,
         listener: Listener,
-        note: String
-    ) {
+        note: String,
+        notify: Boolean = true
+    ): Long {
         val buf = ByteArray(64 * 1024)
         var done = 0L
         var last = 0L
@@ -395,15 +499,18 @@ class VideoCacher(
             if (n <= 0) break
             output.write(buf, 0, n)
             done += n
-            val now = System.currentTimeMillis()
-            if (now - last > 400) {
-                last = now
-                listener.onProgress(done, total, note)
+            if (notify) {
+                val now = System.currentTimeMillis()
+                if (now - last > 400) {
+                    last = now
+                    listener.onProgress(done, total, note)
+                }
             }
         }
         output.flush()
-        listener.onProgress(done, total, note)
+        if (notify) listener.onProgress(done, total, note)
         if (cancelled) throw IllegalStateException("已取消")
+        return done
     }
 
     /** 剩余空间够不够（知道总长时先看一眼，别下到一半才炸） */
@@ -524,6 +631,7 @@ class VideoCacher(
 
     companion object {
         private const val TAG = "VideoCache"
+        private const val MAX_RETRIES = 6
 
         /** 给通知用的大小文案 */
         fun fmt(bytes: Long): String = if (bytes < 0) "未知大小" else String.format(Locale.US, "%.1f MB", bytes / 1024.0 / 1024.0)

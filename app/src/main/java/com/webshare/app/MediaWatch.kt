@@ -41,7 +41,9 @@ object MediaWatch {
         var mime: String,
         val viewId: Int,
         val pageUrl: String,
-        val at: Long
+        val at: Long,
+        /** 发现它那次请求带的 Referer（播放器页），缓存时原样带上 */
+        val referer: String = ""
     ) {
         var size: Long = -1L
 
@@ -107,20 +109,29 @@ object MediaWatch {
     /** 这个请求像不像视频源？像就记下来（会在 WebView 的拦截线程上被调用：别碰 WebView 方法） */
     fun observe(view: WebView?, urlStr: String, headers: Map<String, String>) {
         val kind = classify(urlStr) ?: return
-        addCandidate(System.identityHashCode(view), urlStr, kind, mimeFromHeaders(headers))
+        addCandidate(
+            System.identityHashCode(view), urlStr, kind, mimeFromHeaders(headers),
+            header(headers, "Referer")
+        )
     }
 
     /**
      * 靠响应头认出来的视频：站点常用 /video/12345、/stream?src=… 这种没有扩展名的地址，
      * 只看地址认不出来，但服务器回的 Content-Type 是 video 打头的那种 —— 响应里能看到。
      */
-    fun observeByMime(view: WebView?, urlStr: String, mime: String?) {
+    fun observeByMime(view: WebView?, urlStr: String, mime: String?, referer: String = "") {
         if (mime.isNullOrEmpty() || !mime.startsWith("video/")) return
         if (classify(urlStr) != null) return   // 地址本身就能认，交给 observe 那一套（免得记两条）
-        addCandidate(System.identityHashCode(view), urlStr, KIND_FILE, mime)
+        addCandidate(System.identityHashCode(view), urlStr, KIND_FILE, mime, referer)
     }
 
-    private fun addCandidate(viewId: Int, urlStr: String, kind: String, mime: String) {
+    private fun addCandidate(
+        viewId: Int,
+        urlStr: String,
+        kind: String,
+        mime: String,
+        referer: String
+    ) {
         val pageUrl = synchronized(items) { pageUrls[viewId] } ?: ""
         var added = false
         synchronized(items) {
@@ -132,7 +143,7 @@ object MediaWatch {
             } else if (items.any { it.viewId == viewId && (it.kind == KIND_HLS || it.kind == KIND_DASH) }) {
                 return
             }
-            items.add(Item(urlStr, kind, mime, viewId, pageUrl, System.currentTimeMillis()))
+            items.add(Item(urlStr, kind, mime, viewId, pageUrl, System.currentTimeMillis(), referer))
             while (items.count { it.viewId == viewId } > MAX_PER_VIEW) {
                 val oldest = items.filter { it.viewId == viewId }.minByOrNull { it.at } ?: break
                 items.remove(oldest)
@@ -140,7 +151,7 @@ object MediaWatch {
             added = true
         }
         if (added) {
-            Log.i(TAG, "发现视频候选：$kind $urlStr")
+            Log.i(TAG, "发现视频候选：$kind $urlStr referer=${referer.take(120)}")
             onChange?.invoke()
         }
     }
@@ -205,6 +216,9 @@ object MediaWatch {
             else -> null
         }
     }
+
+    private fun header(headers: Map<String, String>, name: String): String =
+        headers.entries.firstOrNull { it.key.equals(name, true) }?.value ?: ""
 
     private fun mimeFromHeaders(headers: Map<String, String>): String {
         headers.entries.firstOrNull { it.key.equals("Accept", true) }?.value?.let { acc ->

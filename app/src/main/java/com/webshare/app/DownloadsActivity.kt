@@ -56,6 +56,7 @@ class DownloadsActivity : AppCompatActivity() {
 
     private var activeTab = TAB_DOWNLOADS
     private var cacheItems: List<VideoCacheStore.Entry> = emptyList()
+    private var cacheTasks: List<VideoCacheProgress.Task> = emptyList()
     private var cacheSignature = ""
     private val cacheDayFmt = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault())
 
@@ -178,7 +179,7 @@ class DownloadsActivity : AppCompatActivity() {
         emptyView.visibility =
             if (downloads && currentItems.isEmpty()) View.VISIBLE else View.GONE
         cacheEmptyView.visibility =
-            if (!downloads && cacheItems.isEmpty()) View.VISIBLE else View.GONE
+            if (!downloads && cacheItems.isEmpty() && cacheTasks.isEmpty()) View.VISIBLE else View.GONE
 
         if (downloads) updateSelectionUi() else updateHeaderUi()
         if (!downloads) {
@@ -537,17 +538,33 @@ class DownloadsActivity : AppCompatActivity() {
     private fun reloadCache() {
         VideoCacheStore.prune(this)   // 文件被外面删掉的条目顺手清掉
         val items = VideoCacheStore.list(this)
-        val sig = items.joinToString("|") { "${it.id}:${it.size}:${it.title}" }
+        val tasks = VideoCacheProgress.snapshot()
+        val sig = buildString {
+            append(items.joinToString("|") { "${it.id}:${it.size}:${it.title}" })
+            append("||")
+            append(tasks.joinToString("|") {
+                "${it.id}:${it.state}:${it.bytes}:${it.total}:${it.percent}:${it.note}:${it.error}"
+            })
+        }
         if (sig != cacheSignature) {
             cacheSignature = sig
             cacheItems = items
+            cacheTasks = tasks
             cacheAdapter.notifyDataSetChanged()
-            tabCacheText.text =
-                if (cacheItems.isEmpty()) "缓存视频" else "缓存视频 ${cacheItems.size}"
+            val total = cacheItems.size + cacheTasks.size
+            tabCacheText.text = if (total == 0) "缓存视频" else "缓存视频 $total"
         }
         cacheEmptyView.visibility =
-            if (activeTab == TAB_CACHE && cacheItems.isEmpty()) View.VISIBLE else View.GONE
+            if (activeTab == TAB_CACHE && cacheItems.isEmpty() && cacheTasks.isEmpty())
+                View.VISIBLE else View.GONE
         updateHeaderUi()
+    }
+
+    private fun cancelCacheTask(task: VideoCacheProgress.Task) {
+        VideoCacheService.cancel(this, task.id)
+        VideoCacheProgress.remove(task.id)
+        Toast.makeText(this, "已取消缓存", Toast.LENGTH_SHORT).show()
+        reloadCache()
     }
 
     private fun playCache(entry: VideoCacheStore.Entry) {
@@ -674,26 +691,101 @@ class DownloadsActivity : AppCompatActivity() {
             val title: TextView = v.findViewById(R.id.title)
             val subtitle: TextView = v.findViewById(R.id.subtitle)
             val source: TextView = v.findViewById(R.id.source)
+            val progress: ProgressBar = v.findViewById(R.id.cacheProgress)
         }
 
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH =
             VH(LayoutInflater.from(parent.context).inflate(R.layout.item_videocache, parent, false))
 
-        override fun getItemCount(): Int = cacheItems.size
+        override fun getItemCount(): Int = cacheTasks.size + cacheItems.size
 
         override fun onBindViewHolder(holder: VH, position: Int) {
-            val entry = cacheItems[position]
+            if (position < cacheTasks.size) {
+                bindTask(holder, cacheTasks[position])
+            } else {
+                bindEntry(holder, cacheItems[position - cacheTasks.size])
+            }
+        }
+
+        private fun bindTask(holder: VH, task: VideoCacheProgress.Task) {
+            holder.title.text = task.title
+            holder.source.text = task.pageUrl.ifBlank { "网页视频" }
+
+            val failed = task.state == VideoCacheProgress.STATE_FAILED
+            holder.subtitle.setTextColor(if (failed) 0xFFD32F2F.toInt() else 0xFF5F6368.toInt())
+            holder.subtitle.text = when {
+                failed -> "缓存失败 · ${task.error.ifBlank { "未知错误" }}"
+                task.state == VideoCacheProgress.STATE_QUEUED -> "排队中…"
+                task.percent >= 0 -> {
+                    val size = buildString {
+                        append(DownloadService.fmtSize(task.bytes))
+                        if (task.total > 0) append(" / ").append(DownloadService.fmtSize(task.total))
+                    }
+                    "正在缓存 · $size（${task.percent}%）${if (task.note.isNotEmpty()) " · ${task.note}" else ""}"
+                }
+                else -> "正在缓存 · ${DownloadService.fmtSize(task.bytes)}" +
+                    (if (task.note.isNotEmpty()) " · ${task.note}" else "")
+            }
+
+            holder.progress.visibility =
+                if (failed || task.state == VideoCacheProgress.STATE_QUEUED) View.GONE else View.VISIBLE
+            if (task.state == VideoCacheProgress.STATE_QUEUED) {
+                holder.progress.visibility = View.GONE
+            } else if (task.percent >= 0) {
+                holder.progress.isIndeterminate = false
+                holder.progress.progress = task.percent.coerceIn(0, 100)
+            } else {
+                holder.progress.isIndeterminate = true
+            }
+
+            // 进行中的条目只有「取消」，失败的条目只有「移除」；播放/保存/分享都没有
+            for (id in intArrayOf(R.id.btnPlay, R.id.btnSave, R.id.btnShare)) {
+                holder.itemView.findViewById<View>(id).visibility = View.GONE
+            }
+            val delete = holder.itemView.findViewById<TextView>(R.id.btnDelete)
+            delete.visibility = View.VISIBLE
+            delete.text = if (failed) "移除" else "取消"
+            delete.setTextColor(if (failed) 0xFF5F6368.toInt() else 0xFFD32F2F.toInt())
+            delete.setOnClickListener {
+                if (failed) {
+                    VideoCacheProgress.remove(task.id)
+                    reloadCache()
+                } else {
+                    cancelCacheTask(task)
+                }
+            }
+            holder.itemView.setOnClickListener { }
+
+            if (tvMode) {
+                val ring = ContextCompat.getDrawable(this@DownloadsActivity, R.drawable.bg_tv_focus)
+                holder.itemView.isFocusable = true
+                holder.itemView.foreground = ring
+                delete.isFocusable = true
+                delete.foreground = ring
+            }
+        }
+
+        private fun bindEntry(holder: VH, entry: VideoCacheStore.Entry) {
+            holder.progress.visibility = View.GONE
             val kindLabel = if (entry.kind == MediaWatch.KIND_HLS) "网页分片合成" else "视频文件"
             holder.title.text = entry.title
+            holder.subtitle.setTextColor(0xFF5F6368.toInt())
             holder.subtitle.text =
                 "$kindLabel · ${DownloadService.fmtSize(entry.size)} · ${cacheDayFmt.format(Date(entry.createdAt))}"
             holder.source.text = entry.pageUrl.ifBlank { entry.url }
+
+            for (id in intArrayOf(R.id.btnPlay, R.id.btnSave, R.id.btnShare, R.id.btnDelete)) {
+                holder.itemView.findViewById<View>(id).visibility = View.VISIBLE
+            }
+            val delete = holder.itemView.findViewById<TextView>(R.id.btnDelete)
+            delete.text = "删除"
+            delete.setTextColor(0xFFD32F2F.toInt())
 
             holder.itemView.setOnClickListener { playCache(entry) }
             holder.itemView.findViewById<View>(R.id.btnPlay).setOnClickListener { playCache(entry) }
             holder.itemView.findViewById<View>(R.id.btnSave).setOnClickListener { saveCacheToPhone(entry) }
             holder.itemView.findViewById<View>(R.id.btnShare).setOnClickListener { shareCache(entry) }
-            holder.itemView.findViewById<View>(R.id.btnDelete).setOnClickListener { askDeleteCache(entry) }
+            delete.setOnClickListener { askDeleteCache(entry) }
 
             if (tvMode) {
                 val ring = ContextCompat.getDrawable(this@DownloadsActivity, R.drawable.bg_tv_focus)
