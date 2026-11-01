@@ -8,6 +8,8 @@ import android.app.Service
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -16,6 +18,8 @@ import android.provider.DocumentsContract
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.util.Log
+import android.view.Gravity
+import android.widget.TextView
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
@@ -493,11 +497,39 @@ class DownloadService : Service() {
         toastOnMain("下载失败：$error")
     }
 
+    @Suppress("DEPRECATION")
     private fun toastOnMain(text: String) {
         android.os.Handler(mainLooper).post {
             try {
-                Toast.makeText(applicationContext, text, Toast.LENGTH_LONG).show()
-            } catch (_: Exception) {}
+                val ctx = applicationContext
+                val density = resources.displayMetrics.density
+                val view = TextView(ctx).apply {
+                    this.text = text
+                    setTextColor(Color.WHITE)
+                    textSize = 15f
+                    gravity = Gravity.CENTER
+                    maxWidth = (resources.displayMetrics.widthPixels * 0.8f).toInt()
+                    val h = (20 * density).toInt()
+                    val v = (12 * density).toInt()
+                    setPadding(h, v, h, v)
+                    background = GradientDrawable().apply {
+                        setColor(0xE6323232.toInt())
+                        cornerRadius = 24 * density
+                    }
+                }
+                Toast(ctx).apply {
+                    this.view = view
+                    duration = Toast.LENGTH_LONG
+                    // 系统 Toast 默认贴在屏幕底部，会压住下载完成后的「立即打开」按钮；
+                    // 放到屏幕垂直中间，底部按钮永远露出来。Android 12+ 对纯文本 Toast
+                    // 会忽略 setGravity，所以这里用自定义 view 来定位。
+                    setGravity(Gravity.CENTER, 0, 0)
+                }.show()
+            } catch (_: Exception) {
+                try {
+                    Toast.makeText(applicationContext, text, Toast.LENGTH_LONG).show()
+                } catch (_: Exception) {}
+            }
         }
     }
 
