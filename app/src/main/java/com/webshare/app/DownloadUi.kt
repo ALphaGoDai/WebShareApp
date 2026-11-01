@@ -249,7 +249,10 @@ object DownloadOpenFab {
         }
         anchor = root
         if (tv) restoreFocus = activity.currentFocus
-        val y = ((if (tv) 40 else 56) + 14) * density
+        // 下载完成的系统 Toast（「已保存：…」）固定贴在屏幕底部，而且 Toast 是系统窗口，
+        // 永远盖在 App 的 PopupWindow 上面。按钮原来只比底栏高十几 dp，正好被它挡住；
+        // 抬到 120dp，Toast 在下、按钮在上，两个都看得见，也不耽误点「立即打开」。
+        val y = 120 * density
         try {
             p.showAtLocation(root, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL, 0, y.toInt())
         } catch (e: Exception) {
