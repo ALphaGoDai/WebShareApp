@@ -190,6 +190,9 @@ class MainActivity : AppCompatActivity() {
     /** 页面加载完成后要注入的「自动上传」脚本；空表示这次分享不需要自动上传 */
     private var pendingAutoUploadJs: String? = null
 
+    /** 这次分享交给哪个 WebView 处理：别的标签页在后台加载完，别把分享内容/自动上传抢过去 */
+    private var sharedContentView: WebView? = null
+
     /** 攒一下再落盘的 Cookie 写盘任务（见 scheduleCookieFlush） */
     private val flushCookiesRunnable = Runnable { flushCookies() }
 
@@ -1289,6 +1292,7 @@ class MainActivity : AppCompatActivity() {
                     pendingShareUris = emptyList()
                     currentSharedFiles = emptyMap()
                     pendingAutoUploadJs = null
+                    sharedContentView = null
                 }
             }
         } else {
@@ -1297,6 +1301,7 @@ class MainActivity : AppCompatActivity() {
             pendingShareUris = emptyList()
             currentSharedFiles = emptyMap()
             pendingAutoUploadJs = null
+            sharedContentView = null
         }
         // 「到某地自动打开」：只有"用户打开 App"这一种（点图标/最近任务）才判，而且每次打开都重判一次
         // ——走到公交站时 App 多半还在后台，从桌面再点一下就该进设定页。分享进来的内容要占着当前页、
@@ -1308,7 +1313,7 @@ class MainActivity : AppCompatActivity() {
             userTouchedSinceStart = false
             maybeApplyGeoRule()
         }
-        loadUrl()
+        if (currentSharedText != null) loadSharedContent() else loadUrl()
     }
 
     /**
@@ -1608,9 +1613,18 @@ class MainActivity : AppCompatActivity() {
             tabs.add(tab)
         }
         currentIndex = saved.current
+        // 分享冷启动：第一个标签页马上会被 handleIntent 换成带 shared 的地址。这里先别把
+        // 它加载成普通页——否则页面先完成一次，自动上传脚本会注入到没有 shared 的那一版，
+        // 真正带分享内容的页面反而拿不到（表现为站点提示「选文件」而没自动上传）。
+        if (currentIndex == 0 && isShareIntent(intent)) {
+            tabs[0].pendingUrl = null
+        }
         switchTo(currentIndex)   // 当前页立即按恢复的地址加载，后台页等第一次切过去才加载
         syncVoiceShortcuts()
     }
+
+    private fun isShareIntent(intent: Intent?): Boolean =
+        intent?.action == Intent.ACTION_SEND || intent?.action == Intent.ACTION_SEND_MULTIPLE
 
     /**
      * 把各标签页的备注名同步成语音快捷方式（名字就是备注名，点了/说了就切到那一页）。
@@ -2125,7 +2139,7 @@ class MainActivity : AppCompatActivity() {
                     ensureTabStripVisible()
                     persistTabs()
                 }
-                if (currentSharedText != null) {
+                if (currentSharedText != null && view === sharedContentView) {
                     val js = buildString {
                         append("if(typeof window.onSharedContent==='function'){")
                         append("window.onSharedContent({")
@@ -2136,8 +2150,9 @@ class MainActivity : AppCompatActivity() {
                     view?.evaluateJavascript(js, null)
                 }
                 // 分享进来的文件：页面一就绪就把文件塞给它的上传入口，用户不用再点一下
+                // （只认这次分享的目标页；别的标签页在后台加载完不能把脚本抢走）
                 val auto = pendingAutoUploadJs
-                if (auto != null && view != null) {
+                if (auto != null && view != null && view === sharedContentView) {
                     pendingAutoUploadJs = null
                     view.evaluateJavascript(auto, null)
                     view.postDelayed({ reportAutoUpload(view) }, 1800)
@@ -2585,6 +2600,51 @@ class MainActivity : AppCompatActivity() {
     private fun currentTabHasOwnUrl(): Boolean {
         val tab = tabs.getOrNull(currentIndex) ?: return false
         return tab.url != null || tab.pendingUrl != null || tab.webView.url != null
+    }
+
+    /**
+     * 带分享内容启动/切回：交给「第一个标签页」处理，而不是把当前页换成内置起始页。
+     *
+     * 老行为（v1.0.82 及以前）是不管有几个标签页都用 settings.url 当接收页：用户把第一个
+     * 标签页设成 send 文件站、第二个设成 date 日历时，一分享视频，第一个页就被冲成
+     * date?shared=…，文件自然送错了地方。第一个标签页才是用户最早挂载的那一页，分享给它；
+     * 空页/本机播放页才退回内置起始页。
+     */
+    private fun loadSharedContent() {
+        val shared = currentSharedText ?: return
+        val target = tabs.getOrNull(0)
+        val own = target?.let { shareReceiverUrl(it) }
+        val base = (own ?: settingsManager.url.trim()).let { withoutSharedParam(it) }
+        if (base.isEmpty()) {
+            showNoUrlMessage()
+            return
+        }
+        if (target != null && currentIndex != 0) {
+            // 后台标签页还挂着 pendingUrl 的话，switchTo 会先加载旧地址、紧接着又被分享地址覆盖。
+            // 清掉它，让下面这次 load 成为唯一的加载。
+            target.pendingUrl = null
+            switchTo(0)
+        }
+        sharedContentView = webView
+        webAppInterface.setSharedContent(shared, currentSharedType)
+        (webView.webViewClient as? DohWebViewClient)?.sharedFiles = currentSharedFiles
+        webView.loadUrl(appendSharedContent(base, shared))
+    }
+
+    /**
+     * 第一个标签页「挂载时」的地址，作为分享接收页。
+     *
+     * 优先取 WebView 历史里的第一项：用户点进子页、页面自己 302 到登录页之后，
+     * 分享仍然回到最初挂载的那一页，而不是把 shared= 拼到当前的子页上。
+     * 没加载过的后台标签页只有 pendingUrl；空页、本机播放页都退回内置起始页。
+     */
+    private fun shareReceiverUrl(tab: Tab): String? {
+        val first = tab.webView.copyBackForwardList().let { bf ->
+            if (bf.size > 0) bf.getItemAtIndex(0)?.url else null
+        }
+        return (first ?: tab.pendingUrl ?: tab.url ?: tab.webView.url)
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() && it != "about:blank" && !isLocalPlayerPage(it) }
     }
 
     /** 读回注入脚本的结果：走通就轻描一句，没走通提醒用户手动点页面的上传入口 */
