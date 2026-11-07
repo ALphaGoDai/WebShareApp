@@ -313,10 +313,47 @@ class MainActivity : AppCompatActivity() {
             if (granted) {
                 req.grant(req.resources)
             } else {
-                Toast.makeText(this@MainActivity, "没有麦克风权限，网页无法录音", Toast.LENGTH_LONG).show()
                 req.deny()
+                // 系统权限弹窗被拒（或华为已经记住"禁止"、根本不再弹）时，光靠网页自己的
+                // 提示用户找不到入口；这里给一条明确的「去设置」路径。
+                showMicPermissionHelp()
             }
         }
+
+    /** 麦克风被拒绝时告诉用户去哪儿打开（华为的设置路径和各机型略有不同，多写两种） */
+    private fun showMicPermissionHelp() {
+        if (isFinishing || isDestroyed) return
+        AlertDialog.Builder(this)
+            .setTitle("需要麦克风权限")
+            .setMessage(
+                "语音跟读要录音。请在系统设置里允许「" + getString(R.string.app_name) + "」使用麦克风：\n\n" +
+                    "设置 → 应用和服务 → 应用管理 → " + getString(R.string.app_name) +
+                    " → 权限 → 麦克风 → 仅在使用时允许\n\n" +
+                    "也可以长按桌面上的应用图标 → 应用信息 → 权限。"
+            )
+            .setPositiveButton("去设置") { _, _ -> openAppPermissionSettings() }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    /** 打开本应用的系统信息页（华为/荣耀上从这里进「权限」） */
+    private fun openAppPermissionSettings() {
+        try {
+            markOwnUi()
+            startActivity(
+                Intent(
+                    android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.fromParts("package", packageName, null)
+                )
+            )
+        } catch (e: Exception) {
+            Toast.makeText(
+                this,
+                "打不开系统设置，请手动到「设置 → 应用」里给本应用开麦克风权限",
+                Toast.LENGTH_LONG
+            ).show()
+        }
+    }
 
     private val shimJs: String by lazy {
         try {
