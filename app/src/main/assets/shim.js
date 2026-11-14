@@ -858,23 +858,49 @@
   // 「请从首页“人才出行”或者“出行礼遇”入口进入该服务」——它不是靠 UA 认浏览器，
   // 认的是 Enter_Mode（进站来源）和 sdkState（有没有 App 的 JS bridge 报 deviceId）。
   // 站点没给普通浏览器留回原页的路，这里替它补上：记住用户当前在等哪个 rideCode 页面
-  // （sessionStorage，同一标签页里跨域登录、整页刷新都不丢；SPA 内部跳转也跟着更新），
-  // 一旦发现「刚走过登录回调页」又被扔到 /rideCode/talent，就回原页一次。
-  // 只认整页加载（登录回来必然是整页加载），SPA 里自己点去首页不受影响。
+  // （内容页同时写 sessionStorage 和 localStorage——App 被系统杀掉、标签页恢复、
+  // 跨域登录都不会丢；SPA 内部跳转也跟着更新），一旦发现「这趟是登录回来的」又被
+  // 扔到 /rideCode/talent，就回原页。认「登录回来的」有两条：
+  //   ① 上一跳是站点登录回调页，或市民卡 SSO（document.referrer）；
+  //   ② 这个标签页最近 24 小时内走过登录回调页（站点的 token 正好 24 小时有效）。
+  // 只认整页加载（登录回来必然是整页加载）和「登录页里客户端跳到 talent」，
+  // 用户自己从 index 点去首页只清意向、不回弹。
   (function keepRideCodePage() {
     if (location.hostname !== 'xmirc.xmdjej.gov.cn') return;
     var PREFIX = '/italent/talentTraffic/rideCode/';
-    var K_WANT = 'ws_ridecode_want';
-    var K_LOGIN = 'ws_ridecode_login_at';
-    var LOGIN_WINDOW_MS = 10 * 60 * 1000;  // 登录回调页 → 落点只隔几百毫秒，10 分钟足够宽
-    var BOUNCE_LIMIT = 3;                  // 15 秒内同一目标最多回弹 3 次，兜住和站点的死循环
-    var store = null;
-    try {
-      store = window.sessionStorage;
-      store.setItem('ws_probe', '1');
-      store.removeItem('ws_probe');
-    } catch (e) { store = null; }
-    if (!store) return;
+    var K_WANT = 'ws_ridecode_want';          // 当前标签页想去的内容页
+    var K_PIN = 'ws_ridecode_pin';            // 同一份意向的持久副本（App 被杀也还在）
+    var K_LOGIN = 'ws_ridecode_login_at';     // 走过登录回调页的时间
+    var K_BOUNCE = 'ws_ridecode_bounce';      // 回弹次数，兜住和站点的死循环
+    var PIN_TTL_MS = 7 * 24 * 60 * 60 * 1000;     // 一周没再进内容页，意向自然过期
+    var LOGIN_TTL_MS = 24 * 60 * 60 * 1000;       // 落点判定跟着站点 token 的 24 小时走
+    var BOUNCE_LIMIT = 3;                          // 15 秒内同一目标最多回弹 3 次
+    var BOUNCE_WINDOW_MS = 15000;
+
+    function safeStore(s) {
+      try {
+        s.setItem('ws_probe', '1');
+        s.removeItem('ws_probe');
+        return s;
+      } catch (e) { return null; }
+    }
+    var sess = safeStore(window.sessionStorage);
+    var disk = safeStore(window.localStorage);
+    if (!sess && !disk) return;
+
+    function read(store, key) {
+      try { return store ? store.getItem(key) : null; } catch (e) { return null; }
+    }
+    function write(store, key, val) {
+      try { if (store) store.setItem(key, val); } catch (e) {}
+    }
+    function remove(store, key) {
+      try { if (store) store.removeItem(key); } catch (e) {}
+    }
+    function readJson(store, key) {
+      try { return JSON.parse(read(store, key) || 'null'); } catch (e) { return null; }
+    }
+    function writeJson(store, key, val) { write(store, key, JSON.stringify(val)); }
 
     function parts(href) {
       var u;
@@ -885,60 +911,117 @@
         page: u.pathname.slice(PREFIX.length).replace(/\/+$/, '')
       };
     }
+    function pin() {
+      var p = readJson(disk, K_PIN);
+      if (p && p.u && (Date.now() - (p.t || 0)) < PIN_TTL_MS) return p;
+      return null;
+    }
+    // 优先用当前标签页的意向；标签页被恢复、存储丢过就用持久副本
     function want() {
-      try { return JSON.parse(store.getItem(K_WANT) || 'null'); } catch (e) { return null; }
+      var w = readJson(sess, K_WANT);
+      if (w && w.u && (Date.now() - (w.t || 0)) < PIN_TTL_MS) return w;
+      return pin();
     }
     // rideCode 里的内容页才算「用户想去的地方」；首页/信息页/登录页都不算
     function isContent(page) {
       return page === 'index' || page === 'travelRecord' || page === 'useHelp';
     }
+    function remember(p) {
+      var now = Date.now();
+      writeJson(sess, K_WANT, { u: p.path, t: now });
+      writeJson(disk, K_PIN, { u: p.path, t: now });
+    }
+    function forget() {
+      remove(sess, K_WANT);
+      remove(disk, K_PIN);
+    }
     function track(p) {
       if (p.page.indexOf('login') === 0) {          // 登录回调页：记一笔「这趟是登录来的」
-        store.setItem(K_LOGIN, String(Date.now()));
+        var now = String(Date.now());
+        write(sess, K_LOGIN, now);
+        write(disk, K_LOGIN, now);
         return;
       }
-      if (isContent(p.page)) {
-        var prev = want();
-        var now = Date.now();
-        var n = (prev && prev.u === p.path && (now - (prev.t || 0)) < 15000) ? (prev.n || 1) + 1 : 1;
-        if (n > BOUNCE_LIMIT) store.removeItem(K_WANT);
-        else store.setItem(K_WANT, JSON.stringify({ u: p.path, t: now, n: n }));
-      } else {
-        store.removeItem(K_WANT);                   // 用户自己去看别的页了，意向作废
-      }
+      if (isContent(p.page)) remember(p);
+      else forget();                                // 用户自己去看别的页了，意向作废
     }
     function note(href) {                           // 同站但别的业务线（旅游年卡…）也算离开
       var p = parts(href);
       if (p) { track(p); return; }
       var u;
       try { u = new URL(href, location.href); } catch (e) { return; }
-      if (u.hostname === location.hostname) store.removeItem(K_WANT);
+      if (u.hostname === location.hostname) forget();
+    }
+
+    function loginFresh() {
+      var t = parseInt(read(sess, K_LOGIN) || read(disk, K_LOGIN) || '0', 10) || 0;
+      return t > 0 && (Date.now() - t) < LOGIN_TTL_MS;
+    }
+    // 上一跳是不是登录流程；跨域 referrer 只剩源，所以市民卡 SSO 只比主机名
+    function cameFromLogin() {
+      var r = document.referrer || '';
+      if (!r) return false;
+      try {
+        var u = new URL(r);
+        if (u.hostname === 'buss.ixiamen.org.cn') return true;
+        return u.hostname === location.hostname && u.pathname.indexOf(PREFIX + 'login') === 0;
+      } catch (e) { return false; }
+    }
+    function bounceAllowed(target) {
+      var now = Date.now();
+      var rec = readJson(sess, K_BOUNCE) || readJson(disk, K_BOUNCE);
+      return !(rec && rec.u === target && (now - (rec.t || 0)) < BOUNCE_WINDOW_MS &&
+               (rec.n || 0) >= BOUNCE_LIMIT);
+    }
+    function noteBounce(target) {
+      var now = Date.now();
+      var rec = readJson(sess, K_BOUNCE) || readJson(disk, K_BOUNCE);
+      if (!rec || rec.u !== target || (now - (rec.t || 0)) >= BOUNCE_WINDOW_MS) {
+        rec = { u: target, t: now, n: 0 };
+      }
+      rec.n = (rec.n || 0) + 1;
+      rec.t = now;
+      writeJson(sess, K_BOUNCE, rec);
+      writeJson(disk, K_BOUNCE, rec);
+    }
+    function bounce(w, herePath, why) {
+      if (!w || !w.u || w.u === herePath) return false;
+      if (!bounceAllowed(w.u)) return false;
+      noteBounce(w.u);
+      remove(sess, K_LOGIN);
+      remove(disk, K_LOGIN);
+      remove(sess, K_WANT);        // 持久意向先留着：下一次整页恢复还能回原页
+      console.log('[DNS浏览器] ' + why + '，带你回 ' + w.u);
+      location.replace(w.u);
+      return true;
     }
 
     var here = parts(location.href);
     if (here && here.page === 'talent') {           // 刚被登录流程扔到人才服务首页？
-      var w = want();
-      var loginAt = parseInt(store.getItem(K_LOGIN) || '0', 10) || 0;
-      if (w && w.u && w.u !== here.path && loginAt > 0 &&
-          (Date.now() - loginAt) < LOGIN_WINDOW_MS && (w.n || 1) <= BOUNCE_LIMIT) {
-        store.removeItem(K_WANT);
-        store.removeItem(K_LOGIN);
-        console.log('[DNS浏览器] 登录回来被放到人才服务首页，带你回 ' + w.u);
-        location.replace(w.u);
-        return;
-      }
+      var why = cameFromLogin() ? '登录回来被放到人才服务首页' :
+                (loginFresh() ? '刚登录完被放到人才服务首页' : '');
+      if (why && bounce(want(), here.path, why)) return;
     }
     note(location.href);
 
-    // SPA 内部跳转（vue-router 走 pushState/replaceState）也要跟着更新意向，
-    // 否则「先客户端跳到首页、再登录过期」这种路径会拿着过期意向乱回弹
+    // SPA 内部跳转（vue-router 走 pushState/replaceState）也要跟着更新意向；
+    // 登录页里如果客户端直接跳到 talent（不整页刷新），同样回弹一次
+    function afterHistory(beforeHref) {
+      var before = parts(beforeHref);
+      var now = parts(location.href);
+      if (now && now.page === 'talent' && before && before.page.indexOf('login') === 0) {
+        if (bounce(want(), now.path, '登录完在页面里跳到人才服务首页')) return;
+      }
+      note(location.href);
+    }
     try {
       ['pushState', 'replaceState'].forEach(function (m) {
         var orig = history[m];
         if (typeof orig !== 'function') return;
         history[m] = function () {
+          var before = location.href;
           var r = orig.apply(this, arguments);
-          try { note(location.href); } catch (e) {}
+          try { afterHistory(before); } catch (e) {}
           return r;
         };
       });
