@@ -801,14 +801,25 @@
 
   // ---------- 系统通知：网页 Notification → App 的系统通知 ----------
   // Android WebView 不实现网页通知：window.Notification 对象在，但 requestPermission
-  // 永远拿不到权限、new Notification 什么都不弹，页面里的"提醒你一下"就静默消失了。
-  // 这里把它接到 App 的原生通知上（Android.notify → 系统通知栏），页面代码不用改。
+  // 永远拿不到权限、new Notification 什么都不弹；ServiceWorkerRegistration.showNotification
+  // 干脆是 undefined（大量站点走的是这条路）。这里把两种写法都接到 App 的原生通知上
+  // （Android.notify → 系统通知栏），页面代码不用改。
   (function installNotifications() {
     if (window.__wsNotifyInstalled) return;
     if (!bridge.notify) return;
+    function canNotify() {
+      try { return bridge.notifyAllowed ? !!bridge.notifyAllowed() : true; } catch (e) { return true; }
+    }
+    function post(title, options) {
+      options = options || {};
+      var t = String(title == null ? '' : title);
+      var b = String(options.body == null ? '' : options.body);
+      try { bridge.notify(t, b, String(location.host || '')); } catch (e) {}
+      return t;
+    }
     function Notify(title, options) {
       options = options || {};
-      this.title = String(title == null ? '' : title);
+      this.title = post(title, options);
       this.body = String(options.body == null ? '' : options.body);
       this.tag = String(options.tag == null ? '' : options.tag);
       this.onclick = null;
@@ -816,9 +827,6 @@
       this.onshow = null;
       this.onerror = null;
       var self = this;
-      try {
-        bridge.notify(self.title, self.body, String(location.host || ''));
-      } catch (e) {}
       // onshow 在浏览器里是异步派的，页面常拿它当"已经发出去了"的信号
       setTimeout(function () {
         if (typeof self.onshow === 'function') {
@@ -834,11 +842,19 @@
       };
       this.removeEventListener = function () {};
     }
-    Notify.permission = 'granted';
+    try {
+      Object.defineProperty(Notify, 'permission', {
+        get: function () { return canNotify() ? 'granted' : 'denied'; },
+        configurable: true
+      });
+    } catch (e) {
+      Notify.permission = canNotify() ? 'granted' : 'denied';
+    }
     Notify.maxActions = 0;
     Notify.requestPermission = function (cb) {
-      if (typeof cb === 'function') { try { cb('granted'); } catch (e) {} }
-      return Promise.resolve('granted');
+      var state = canNotify() ? 'granted' : 'denied';
+      if (typeof cb === 'function') { try { cb(state); } catch (e) {} }
+      return Promise.resolve(state);
     };
     try {
       Object.defineProperty(window, 'Notification', {
@@ -846,6 +862,31 @@
       });
     } catch (e) {
       try { window.Notification = Notify; } catch (e2) {}
+    }
+    // ServiceWorkerRegistration.showNotification：WebView 里没有这个函数，站点调用会
+    // TypeError。补一个同名方法走同一条原生通知通道（不依赖 SW 真的激活，页面只要拿到
+    // registration 就能发）。已有实现时不覆盖，避免挡住以后 WebView 自带的支持。
+    var swProto = window.ServiceWorkerRegistration && window.ServiceWorkerRegistration.prototype;
+    if (swProto && typeof swProto.showNotification !== 'function') {
+      var showNotification = function (title, options) {
+        post(title, options);
+        return Promise.resolve();
+      };
+      try {
+        Object.defineProperty(swProto, 'showNotification', {
+          value: showNotification, configurable: true, writable: true
+        });
+      } catch (e) {
+        try { swProto.showNotification = showNotification; } catch (e2) {}
+      }
+    }
+    if (swProto && typeof swProto.getNotifications !== 'function') {
+      try {
+        Object.defineProperty(swProto, 'getNotifications', {
+          value: function () { return Promise.resolve([]); },
+          configurable: true, writable: true
+        });
+      } catch (e) {}
     }
     window.__wsNotifyInstalled = true;
   })();

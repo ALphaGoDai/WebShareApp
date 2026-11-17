@@ -1,4 +1,4 @@
-# DNS浏览器 (WebShareApp)
+# DNS浏览器 (DnsWeb)
 
 > 应用显示名 v1.0.43 起是 **「DNS浏览器」**（此前叫「网页分享助手」）。包名 `com.webshare.app`
 > 没变，覆盖安装即可，登录状态/标签页都在。
@@ -25,8 +25,10 @@
 - **标签页备注名 = 语音直达**（v1.0.44 起）：在标签页切换器里**长按标签页标题栏**就能给这一页起个备注名
   （如把乘车码那页叫「乘车码」），留空确定即恢复原名。备注名会自动变成桌面 / 助手的快捷指令，
   所以对小艺说「打开 DNS浏览器 乘车码」就直接切到那个标签页，**不用去设置页配置**
-- **系统通知**（v1.0.44 起）：网页里的 `new Notification(...)` 由 App 转成系统通知（渠道「网页通知」，
-  显示来源域名，点通知回到对应页面）；Android 13+ 首次打开时申请一次通知权限
+- **系统通知**（v1.0.44 起，v1.0.86 增强）：网页里的 `new Notification(...)` 和
+  `ServiceWorkerRegistration.showNotification(...)` 都由 App 转成系统通知（渠道「网页通知」，
+  显示来源域名，点通知回到 App）；Android 13+ 首次打开时申请一次通知权限。
+  注意：这是「网页开着时由网页触发」的通知，不是服务器推送——网页/App 关掉后收不到
 - **已下载页批量操作**（v1.0.44 起）：长按任一条进入多选，可全选后**批量重试 / 批量分享 / 批量删除**
   （删除会先问「删除文件并移除记录」还是「仅移除记录」）
 - **自定义 DNS 是可编辑下拉框**（v1.0.44 起）：点输入框列出常用 DoH 与 UDP DNS，选中即填入，也照旧能手输
@@ -70,7 +72,7 @@
 ## 项目结构
 
 ```
-WebShareApp/
+DnsWeb/
 ├── app/
 │   ├── build.gradle.kts
 │   ├── proguard-rules.pro
@@ -97,6 +99,8 @@ WebShareApp/
 ├── build.gradle.kts
 ├── settings.gradle.kts
 ├── gradle.properties
+├── tools/
+│   └── testserver.ps1         # 登录流程 E2E 测试服务器（PowerShell，本地工具不提交）
 └── gradle/wrapper/
     └── gradle-wrapper.properties
 ```
@@ -120,7 +124,7 @@ WebShareApp/
 ### 方式二：使用 Android Studio
 
 1. 打开 Android Studio
-2. 选择 `File > Open`，选择 `WebShareApp` 目录
+2. 选择 `File > Open`，选择 `DnsWeb` 目录
 3. 等待 Gradle 同步完成（Android Studio 会自动生成 gradle-wrapper.jar）
 4. 点击 `Run` 按钮编译并安装到手机
 

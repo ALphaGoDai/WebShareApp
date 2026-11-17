@@ -13,5 +13,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "WebShareApp"
+rootProject.name = "DnsWeb"
 include(":app")
